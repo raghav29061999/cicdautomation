@@ -1,10 +1,7 @@
-flowchart TD
-    client[Test Client] -->|send message| sdk[A2AClient]
-    sdk -->|POST /message| server[LangGraph A2A Server]
-    server --> handler[DefaultRequestHandler]
-    handler --> executor[CurrencyAgentExecutor]
-    executor --> agent[LangGraph CurrencyAgent]
-    agent -->|LLM + Tools| llm[Gemini via LangChain]
-    executor -->|events| handler
-    handler -->|streamed Task updates| sdk
-    sdk --> client
+The LangGraph Currency Agent builds on top of the A2A SDK with advanced features. When a user sends a message (e.g., “How much is 10 USD in INR?”), the client uses A2AClient to call the agent server. This routes the request to a DefaultRequestHandler, which in turn invokes CurrencyAgentExecutor.
+
+Internally, the agent uses LangGraph’s ReAct agent pattern powered by an LLM like Gemini or OpenAI. If the query lacks information (e.g., no target currency), the agent replies with a TaskStatusUpdateEvent in the input_required state. The client can respond to this follow-up in the same task context using the taskId.
+
+Streaming is handled via EventQueue, where intermediate messages (e.g., “Looking up exchange rates...”) are streamed as status-update events, and final responses (e.g., “10 USD is 856.2 INR.”) are streamed as artifact-update events. The task ends with a TaskStatusUpdateEvent marked completed.
+
+State is stored via InMemoryTaskStore, allowing the agent to handle multi-turn interactions. The agent can also be extended to support push notifications and other tools. The client test script demonstrates all these interaction types: synchronous, streaming, and multi-turn.
