@@ -1,1 +1,11 @@
-https://github.com/raghav29061999/a2a
+We’re demonstrating a LangGraph-powered Currency Agent that supports:
+
+LLM integration (via Gemini/OpenAI)
+
+Real-time streaming updates
+
+Multi-turn conversations when input is ambiguous
+
+Persistent task state using A2A protocol
+
+The goal is to show how an intelligent agent can interact like a chatbot but with robust backend orchestration, state, and streaming capabilities using A2A.
