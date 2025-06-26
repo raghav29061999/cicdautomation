@@ -1,17 +1,1 @@
-Test Client (test_client.py)
-Fetches the agent card (using A2ACardResolver) and sends a request (using A2AClient). Supports both non-streaming and streaming modes.
-
-Agent Definition (agent_executor.py)
-
-HelloWorldAgent: Business logic class returning "Hello World".
-
-HelloWorldAgentExecutor: Inherits from AgentExecutor, invokes the agent and sends response via EventQueue.
-
-Server Entry (__main__.py)
-
-Defines skills and agent cards (public and extended).
-
-Starts the A2A server using A2AStarletteApplication, connecting the executor and handler (DefaultRequestHandler) with an in-memory task store.
-
-Execution Flow:
-The client sends a message → server routes it via the handler → executor runs agent logic → responds with "Hello World".
+https://github.com/raghav29061999/a2a
