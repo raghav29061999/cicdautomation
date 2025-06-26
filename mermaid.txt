@@ -1,7 +1,28 @@
-The LangGraph Currency Agent builds on top of the A2A SDK with advanced features. When a user sends a message (e.g., “How much is 10 USD in INR?”), the client uses A2AClient to call the agent server. This routes the request to a DefaultRequestHandler, which in turn invokes CurrencyAgentExecutor.
+sequenceDiagram
+    participant User
+    participant A2AClient
+    participant A2A Server
+    participant RequestHandler
+    participant CurrencyAgentExecutor
+    participant LangGraphAgent
+    participant LLM (Gemini/OpenAI)
 
-Internally, the agent uses LangGraph’s ReAct agent pattern powered by an LLM like Gemini or OpenAI. If the query lacks information (e.g., no target currency), the agent replies with a TaskStatusUpdateEvent in the input_required state. The client can respond to this follow-up in the same task context using the taskId.
+    User->>A2AClient: Send message (e.g., "How much is 10 USD?")
+    A2AClient->>A2A Server: /message/send
+    A2A Server->>RequestHandler: Dispatch request
+    RequestHandler->>CurrencyAgentExecutor: .execute()
+    CurrencyAgentExecutor->>LangGraphAgent: Process query
+    LangGraphAgent->>LLM (Gemini/OpenAI): Use LLM + tools
+    LLM (Gemini/OpenAI)-->>LangGraphAgent: Return thought/tool result
+    LangGraphAgent-->>CurrencyAgentExecutor: Final response or ask clarification
 
-Streaming is handled via EventQueue, where intermediate messages (e.g., “Looking up exchange rates...”) are streamed as status-update events, and final responses (e.g., “10 USD is 856.2 INR.”) are streamed as artifact-update events. The task ends with a TaskStatusUpdateEvent marked completed.
+    CurrencyAgentExecutor->>RequestHandler: Enqueue Event(s)
+    Note right of RequestHandler: Streaming<br/>status-update,<br/>artifact-update,<br/>input_required
+    RequestHandler->>A2AClient: Stream Events
+    A2AClient->>User: Display each chunk to user
 
-State is stored via InMemoryTaskStore, allowing the agent to handle multi-turn interactions. The agent can also be extended to support push notifications and other tools. The client test script demonstrates all these interaction types: synchronous, streaming, and multi-turn.
+    alt Input required
+        User->>A2AClient: Provide missing info (e.g., "to INR")
+        A2AClient->>A2A Server: message/send with taskId
+        A2A Server->>RequestHandler: Resume task
+    end
