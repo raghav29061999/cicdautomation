@@ -1,28 +1,29 @@
 flowchart TD
-  subgraph Client Side
-    CLI[Test Client]
-  end
+    subgraph Client_Side
+        CLI[Test Client]
+    end
 
-  subgraph A2A Agent Server
-    A2AClient[A2AClient SDK]
-    Resolver[A2ACardResolver]
-    App[A2AStarletteApplication]
-    Handler[DefaultRequestHandler]
-    Executor[HelloWorldAgentExecutor]
-    Agent[HelloWorldAgent]
-    Store[InMemoryTaskStore]
-  end
+    subgraph Interfaces
+        AgentCard["Public Agent Card (.well-known/agent.json)"]
+        ExtendedCard["Extended Agent Card (/agent/authenticatedExtendedCard)"]
+    end
 
-  subgraph Interfaces
-    Card[.well-known/agent.json]
-  end
+    subgraph A2A_Agent_Server
+        Resolver[A2ACardResolver]
+        A2AClient[A2AClient SDK]
+        App[A2AStarletteApplication]
+        Handler[DefaultRequestHandler]
+        Executor[HelloWorldAgentExecutor]
+        Agent[HelloWorldAgent]
+        TaskStore[InMemoryTaskStore]
+    end
 
-  CLI -->|Fetch AgentCard| Resolver --> Card
-  CLI -->|send_message or stream| A2AClient
-  A2AClient --> App
-  App --> Handler
-  Handler --> Executor
-  Executor --> Agent
-  Executor -->|Events| Handler
-  Handler --> Store
-  App -->|Responds with Hello World| A2AClient --> CLI
+    CLI -->|Fetch Agent Card| Resolver --> AgentCard
+    Resolver --> ExtendedCard
+    CLI -->|Send message / stream| A2AClient --> App
+    App --> Handler
+    Handler --> Executor
+    Executor --> Agent
+    Executor -->|"Returns: Hello World"| Handler
+    Handler --> TaskStore
+    Handler -->|Responds to Client| A2AClient --> CLI
