@@ -1,6 +1,6 @@
-This example demonstrates a minimal A2A (Agent-to-Agent) setup using the Python SDK.
-The Test Client fetches the agent’s capabilities via the Agent Card served at /.well-known/agent.json using A2ACardResolver. It then sends a message using A2AClient, either via a direct call or as a streaming request.
+flowchart TD
+    Client["🧑 Client"]
+    Server["🤖 A2A Agent"]
 
-On the server side, the A2AStarletteApplication routes the request to DefaultRequestHandler, which uses HelloWorldAgentExecutor to invoke HelloWorldAgent. The agent simply returns the response "Hello World", which is sent back as a Message or Streamed Event.
-
-This setup also demonstrates support for authenticated extended capabilities, where an additional skill (super_hello_world) is available for authenticated clients.
+    Client -->|Send Message| Server
+    Server -->|Hello World| Client
