@@ -1,28 +1,34 @@
-sequenceDiagram
-    participant User
-    participant A2AClient
-    participant A2A Server
-    participant RequestHandler
-    participant CurrencyAgentExecutor
-    participant LangGraphAgent
-    participant LLM (Gemini/OpenAI)
+flowchart TD
+    A[Raw Data Sources] --> B[Kafka Topic - Raw Stream]
+    B --> C[Kafka Connect + Debezium]
+    C --> D[Metadata Extraction - DataHub or OpenMetadata]
+    B --> E[Profiling Engine - Pandas or YData Profiling]
 
-    User->>A2AClient: Send message (e.g., "How much is 10 USD?")
-    A2AClient->>A2A Server: /message/send
-    A2A Server->>RequestHandler: Dispatch request
-    RequestHandler->>CurrencyAgentExecutor: .execute()
-    CurrencyAgentExecutor->>LangGraphAgent: Process query
-    LangGraphAgent->>LLM (Gemini/OpenAI): Use LLM + tools
-    LLM (Gemini/OpenAI)-->>LangGraphAgent: Return thought/tool result
-    LangGraphAgent-->>CurrencyAgentExecutor: Final response or ask clarification
+    D --> F[AI Rule Generator - LLM or RAG]
+    E --> F
 
-    CurrencyAgentExecutor->>RequestHandler: Enqueue Event(s)
-    Note right of RequestHandler: Streaming<br/>status-update,<br/>artifact-update,<br/>input_required
-    RequestHandler->>A2AClient: Stream Events
-    A2AClient->>User: Display each chunk to user
+    F --> G[Rule Validator Engine]
+    G -->|Success/Failure| H[Result Sink - Kafka or Parquet]
+    G -->|GE / Deequ| I[Validation Reports]
 
-    alt Input required
-        User->>A2AClient: Provide missing info (e.g., "to INR")
-        A2AClient->>A2A Server: message/send with taskId
-        A2A Server->>RequestHandler: Resume task
+    H --> J[Feedback UI or API]
+    J --> K[Feedback DB - PostgreSQL or MongoDB]
+    K --> L[Model Retrainer - Airflow or Prefect]
+
+    L --> F
+
+    I --> M[Rule Registry DB]
+    F --> M
+
+    M --> N[REST API / UI Access]
+
+    subgraph "Validation Engine"
+        G
+        I
+    end
+
+    subgraph "Feedback Loop"
+        J
+        K
+        L
     end
