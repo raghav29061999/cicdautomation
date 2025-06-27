@@ -1,34 +1,53 @@
-flowchart TD
-    A[Raw Data Sources] --> B[Kafka Topic - Raw Stream]
-    B --> C[Kafka Connect + Debezium]
-    C --> D[Metadata Extraction - DataHub or OpenMetadata]
-    B --> E[Profiling Engine - Pandas or YData Profiling]
-
-    D --> F[AI Rule Generator - LLM or RAG]
-    E --> F
-
-    F --> G[Rule Validator Engine]
-    G -->|Success/Failure| H[Result Sink - Kafka or Parquet]
-    G -->|GE / Deequ| I[Validation Reports]
-
-    H --> J[Feedback UI or API]
-    J --> K[Feedback DB - PostgreSQL or MongoDB]
-    K --> L[Model Retrainer - Airflow or Prefect]
-
-    L --> F
-
-    I --> M[Rule Registry DB]
-    F --> M
-
-    M --> N[REST API / UI Access]
-
-    subgraph "Validation Engine"
-        G
-        I
+graph TD
+    subgraph "Ingestion Layer"
+        A1[Kafka Broker]
+        A2[Kafka Connect + Debezium]
+        A3[Schema Registry]
     end
 
-    subgraph "Feedback Loop"
-        J
-        K
-        L
+    subgraph "Metadata & Profiling"
+        B1[OpenMetadata or DataHub]
+        B2[YData or Pandas Profiling]
     end
+
+    subgraph "AI Rule Generator - Dockerized"
+        C1[LLM Container - Mistral or Phi-3]
+        C2[RAG Pipeline - LangChain or Haystack]
+        C3[Embedding Store - FAISS or Weaviate]
+    end
+
+    subgraph "Validation Engine - Dockerized"
+        D1[Great Expectations Container]
+        D2[Deequ Spark Job - Optional]
+    end
+
+    subgraph "API Layer - Dockerized"
+        E1[FastAPI Service]
+        E2[Streamlit UI - Optional]
+    end
+
+    subgraph "Orchestration & Feedback"
+        F1[Airflow Scheduler]
+        F2[PostgreSQL - Feedback DB]
+        F3[Parquet or DeltaLake Logs]
+    end
+
+    A1 --> A2
+    A1 --> A3
+    A2 --> B1
+    A2 --> B2
+    B1 --> C1
+    B2 --> C1
+    C1 --> C2
+    C2 --> C3
+    C2 --> D1
+    D1 --> F3
+    D1 --> E1
+    D2 --> F3
+
+    E1 --> F2
+    E1 --> F1
+    F2 --> F1
+    F1 --> C1
+
+    E1 -->|Docker Compose or K8s| G1[Docker Host]
