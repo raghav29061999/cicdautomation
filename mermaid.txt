@@ -1,2 +1,19 @@
+3 different types of memories for AI agents
 
-"In this demo, I'll walk you through a notebook that demonstrates how to build a long-term memory agent using the LangChain framework. The idea is to create an intelligent agent that not only responds to user queries but also retains memory of past interactions — just like a human assistant would. We're using OpenAI’s LLMs to handle conversation and embeddings, while tools like FAISS or in-memory vector stores help recall relevant context from previous chats. This memory-enhanced capability allows the agent to understand and personalize responses over time, which is particularly useful in use cases like tutoring bots, customer support agents, or personal productivity tools. Throughout the notebook, you’ll see how LangChain integrates memory modules, stream handling, and retrieval-based logic seamlessly into an LLM-powered workflow."
+1 semantic memory: Basically facts. Facts that have been learned in school for an Human same for an agent. Facts based on or about a user
+2 Episodic: Experiances. THings that have been done. Past agent actions
+3 Procedural: Instructions. Insticts or motor skills. Agent System prompt
+
+
+Two ways of agent interacting with memory
+
+1 Hot path - User message is hand to hand updated in memory. You have have one agent. Complicated for multiple agents
+2 Background Updation - flip to hot path. No latency, now you have 2 agents to manage
+
+in this we will build an email responder
+
+triages the incoming agent, if the email is worth responding passes it to second agent and calender action happens
+FOr this first type of memory we are giving it is Semantic Mempory. Tools for wrtting memory and for reading memory
+Hot path will be used. 
+
+then we will use Episodic memory with few shot examples and background memory
