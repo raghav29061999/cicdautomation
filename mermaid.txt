@@ -1,8 +1,5 @@
-| Feature Category             | **Letta**                                      | **LangChain**                                   | **LangGraph**                                    |
-| ---------------------------- | ---------------------------------------------- | ----------------------------------------------- | ------------------------------------------------ |
-| 🧠 **Memory Granularity**    | Block-based shared memory (global & per-agent) | Multiple memory types (summary, buffer, vector) | Scratchpad, node-level, and global memory        |
-| 🤖 **Agent Flexibility**     | Built-in multi-agent design with roles & APIs  | AgentExecutor + Tool usage (more manual)        | Graph-based agents with dynamic routing          |
-| 💻 **UI & Dev Experience**   | Web UI, ADE, chat templates, TypeScript SDK    | Python API and LangSmith (analytics)            | Code-based graphs, visualizable via SDKs         |
-| 🚀 **Deployment Mode**       | Self-hosted (Docker / Letta Desktop) + Cloud   | Self-hosted, serverless, notebooks              | Python package (run in-memory / serverless)      |
-| 🔄 **Inter-Agent Messaging** | Yes (API for sending async messages)           | No native messaging; needs orchestration        | Limited; relies on state transitions, not direct |
-| 📦 **Tooling Support**       | TypeScript SDK, Python SDK                     | Wide ecosystem of tools (retrievers, chains)    | Tool usage within graph nodes                    |
+| **Use Case**                          | **Best Fit**    | **Why**                                                                           |
+| ------------------------------------- | --------------- | --------------------------------------------------------------------------------- |
+| 👤 **Personal Assistant**             | ✅ **Letta**     | Built-in memory, agent roles, easy UI templates, persistent multi-session support |
+| 🏢 **Enterprise Workflow / Pipeline** | ✅ **LangGraph** | Graph-based logic, stateful transitions, long-term memory across dynamic paths    |
+| 🧩 **Composable / Modular Agents**    | ✅ **LangChain** | Rich ecosystem, tools & retrievers, custom chaining, flexible agent design        |
