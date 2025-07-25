@@ -1,27 +1,48 @@
-✅ Slide 6: LangChain – Long-Term Memory Agent
-📌 What is it?
-LangChain’s Long-Term Memory Agent is an LLM-based agent architecture designed to persist memory across interactions, allowing agents to recall past conversations, tasks, or context.
+LangGraph – Adding Memory to Agents
+🧠 What is LangGraph?
+LangGraph is a library that extends LangChain by allowing developers to define agentic workflows as stateful graphs. It supports node-level and long-term memory, enabling more complex and persistent agent behaviors.
 
 🔍 Key Features
-🧠 Persistent Memory Integration
-Uses LangChain’s memory modules (e.g. VectorStoreRetrieverMemory, ConversationBufferMemory) to store context over long-term sessions.
+🔄 Graph-Based Agent Flow
+Define agent interactions as nodes in a directed graph (e.g. planning, tool use, reflection).
 
-🔁 Tool-Enabled Agents
-Supports tools, functions, and plugins — letting the agent recall information, browse documents, or use APIs while keeping memory intact.
+🧱 Multiple Memory Types
 
-🏗️ Customizable Chains & Prompts
-You can define how memory is summarized, retrieved, and injected into the prompt.
+Scratchpad Memory: Short-term context at each node
 
-💬 Multi-turn Conversational Flow
-Retains historical user inputs and responses, ideal for applications like tutoring, coaching, or dialogue-based agents.
+Global State Memory: Shared long-term memory between nodes
 
-🛠️ Architecture Overview
-🧱 Components:
+Vector Memory: Semantic recall via embedding stores (e.g., Chroma, Weaviate)
 
-Agent Executor: Runs the main agent logic
+🔧 Customizable Execution Control
+Use conditional edges to control flow based on memory, output, or token usage.
 
-Tools: Search, code, math, APIs
+🧩 Tool Integration
+Each node can invoke tools, access memory, or perform summarization.
 
-Memory Module: Stores & retrieves conversation context
+<Code>
+flowchart TD
+    A[User Input] --> B[Input Node]
+    B --> C[Planner Node]
+    
+    C --> D[Tool Use Node]
+    C --> E[Reflect Node]
+    C --> F[Summarize Node]
+    C --> G[End Node]
 
-🔗 Built using LangChain’s Agent + Tool + Memory architecture
+    subgraph Global Memory Store
+        M1[Reads/Writes Memory]
+    end
+
+    D --> M1
+    E --> M1
+    F --> M1
+    G --> M1
+
+    click A "https://www.deeplearning.ai/short-courses/long-term-agentic-memory-with-langgraph/" _blank
+
+    %% Annotations
+    C:::note
+
+    classDef note fill:#f9f,stroke:#333,stroke-width:1px;
+</code>
