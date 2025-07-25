@@ -1,69 +1,119 @@
-🔹 Opening – Quick Refresher on A2A
-"Let me begin with a quick refresher on the A2A protocol, or Agent-to-Agent protocol. At its core, A2A is a communication standard designed to facilitate structured, stateful, and interoperable interactions between autonomous agents or between agents and clients. It introduces a standardized way to define agent capabilities, communicate tasks, manage state, and support multi-modal, multi-turn conversations—optionally powered by LLMs or deterministic logic.
+MemGPT is a research-backed framework for equipping LLMs with virtual memory management, simulating RAM and disk-like behavior. Letta, evolved from MemGPT, builds on these ideas and extends them with a full developer-facing platform.
 
-The Python SDK for A2A helps us scaffold and deploy such agents rapidly while remaining fully compliant with the A2A specification."
+--------------
 
-🔹 Part 1 – HelloWorld A2A Agent Demo
-"The first demo is a minimal but complete A2A implementation, aptly called the HelloWorld Agent.
+Why Letta for MemGPT?
+🧠 Memory Modules: Easily plug in working memory, long-term memory, and memory paging logic
 
-Here’s how the architecture works:
+🧪 Experimentation Sandbox: Letta offers a visual and programmable space to explore how MemGPT agents:
 
-Agent Skill Definition:
-Every A2A agent must explicitly declare its capabilities. This is encapsulated in an AgentSkill object. For HelloWorld, the skill is defined with an ID of hello_world, a description, input/output media types (text/plain in this case), and examples. This acts as a semantic contract—informing any client what this agent can handle.
+Manage memory overflow
 
-Agent Card Declaration:
-The agent card, a structured JSON exposed at /.well-known/agent.json, is the digital identity of the agent. It includes metadata like the agent's name, version, capabilities (like streaming), and an array of declared skills.
-For authenticated setups, an extended agent card can also be defined—offering richer capabilities to privileged clients.
+Swap information between short-term and long-term storage
 
-Agent Executor:
-This is the logical bridge between the A2A server's orchestration layer and our domain-specific logic.
-The HelloWorldAgentExecutor implements AgentExecutor and handles the lifecycle of incoming A2A requests via its execute() method.
-In this case, it delegates the task to a simple agent class which returns the string "Hello World", which is then wrapped in a Message event and sent back via the event queue.
+Recall and forget based on time or priority
 
-Server Initialization:
-Using the A2AStarletteApplication class, the server is bootstrapped with the agent card and the DefaultRequestHandler, which binds the executor and task store (an InMemoryTaskStore in this case).
-It's launched using uvicorn, listening on port 9999.
+💡 Ideal for Learning: Letta breaks down complex memory operations into visible, editable components
 
-Client Interaction:
-A simple test client retrieves the agent card, initializes the A2AClient, and sends a SendMessageRequest containing a user message.
-The server responds with a plain message event: 'Hello World'.
 
-This setup illustrates the end-to-end request-response lifecycle and the structure A2A enforces—from discovery, to capability negotiation, to response handling—all in a stateless form."
+----------------
 
-🔹 Part 2 – Advanced LangGraph Agent with Streaming & Multi-Turn Support
-"Now let’s look at a more sophisticated example that pushes the boundaries of what A2A supports—a LangGraph-powered Currency Agent integrating a Large Language Model, specifically Google Gemini.
 
-This agent demonstrates three major enhancements over HelloWorld:
+<code>
 
-LLM Integration with LangChain + LangGraph:
-The CurrencyAgent internally uses ChatGoogleGenerativeAI via LangChain, orchestrated through LangGraph’s ReAct-style flow.
-This means the agent can reason, call tools like get_exchange_rate, and respond based on intermediate results.
+flowchart TD
+    A[User Browser] -->|Types Prompt| B[Next.js Frontend]
+    B --> C[Letta API - SDK]
+    C --> D[Letta Server]
+    D --> E[LLM Agent]
+    E --> F[Memory Config - default-agents.json]
+    D --> G[Cookie Session Manager]
 
-Task State Management:
-Unlike HelloWorld, this agent returns a full Task object, supporting multi-turn interactions and streaming.
-The CurrencyAgentExecutor inspects the incoming RequestContext to determine if it’s a follow-up message or a new interaction and maintains continuity using TaskStore.
+    style A fill:#E0F7FA
+    style B fill:#E3F2FD
+    style C fill:#BBDEFB
+    style D fill:#FFF3E0
+    style E fill:#E8F5E9
+    style F fill:#F3E5F5
+    style G fill:#FFECB3
+</code>
 
-Streaming & Multi-Turn Eventing:
-The executor emits intermediate updates via TaskStatusUpdateEvent and returns the final result using TaskArtifactUpdateEvent.
-If clarification is needed, it sends an event with TaskState.input_required, asking the client for more input. This illustrates asynchronous back-and-forth using a single logical task.
+What is the Letta Chatbot Template?
+A prebuilt web app stack (Next.js, React, TypeScript) that integrates with Letta to build and deploy ChatGPT-like AI chatbots that retain memory across sessions.
 
-I’ve also created a custom CLI wrapper that leverages A2ACardResolver and A2AClient to send dynamic questions to this agent. This tool allows me to query the Currency Agent like:
+Key Features
+📁 Static Agent Configuration: Agent persona, model, and memory defined in default-agents.json
 
-bash
-Copy
-Edit
-python cli_test.py --question "100 USD in EUR"
-The server then responds with a streamed or structured message depending on the complexity of the query.
+🔐 Cookie-Based Session Tracking: Anonymous, persistent chat history per browser session
 
-All server-side orchestration remains compliant with the A2A protocol—exposing the same /agent.json endpoint, supporting authenticated access, and enforcing clean message schema definitions."
+🛠️ Modern Stack: Built with Next.js 15+, Shadcn UI, and Letta’s TypeScript SDK
 
-🔹 Closing – Why This Matters
-"Together, these two demos show the full spectrum of A2A agent design—from a minimal stateless agent to a fully stateful, LLM-integrated agent with streaming and memory.
 
-The Agent Card provides discoverability and feature introspection.
-The Agent Skill defines scoped capabilities.
-The Agent Executor acts as the bridge between protocol-level abstraction and agent-specific intelligence.
-And the A2A Server and Client SDKs allow us to implement and test these capabilities quickly, with clean separation of concerns.
 
-This positions A2A as a powerful foundation for building scalable, composable, and interoperable AI agents—ready for complex real-world applications, whether in tooling automation, enterprise workflows, or agentic collaboration."
+Quickstart Steps
+Run a Letta server locally (via Docker or Letta Desktop)
 
+Clone and configure the chatbot template repo
+
+Define agents and launch the chatbot on localhost:3000
+
+
+--------------------
+
+
+<code>
+flowchart TD
+    subgraph Agents
+        S[Supervisor Agent]
+        W[Worker Agent]
+    end
+
+    S --> M[Shared Memory Block - Org: Letta]
+    W --> M
+
+    S -->|Reads Updates| M
+    W -->|Writes Results| M
+
+    subgraph Letta_Server
+        API[Letta Python SDK]
+        MsgTool[Custom Messaging Tool]
+        BlockMgr[Memory Manager]
+    end
+
+    MsgTool -->|Send Msg| W
+    API --> S
+    API --> W
+    BlockMgr --> M
+
+    style S fill:#E1F5FE
+    style W fill:#F1F8E9
+    style M fill:#EDE7F6
+    style MsgTool fill:#FFECB3
+
+</code>
+🤖 Slide 5: Multi-Agent Collaboration with Shared Memory in Letta
+Letta for Multi-Agent Systems
+Letta enables developers to build collaborative agents that can message each other and share memory blocks — supporting coordination, delegation, and team behavior among AI agents.
+
+Features for Multi-Agent Communication
+🔁 Asynchronous Messaging via Letta API:
+
+Send commands from a supervisor to a worker
+
+Trigger actions dynamically from custom tools
+
+📦 Shared Memory Blocks:
+
+Multiple agents can attach to the same memory block
+
+Updates by one agent are instantly visible to others
+
+Perfect for syncing plans, context, or task outcomes
+
+Example Architecture
+👷 Worker Agent writes task result to shared memory
+
+🧑‍💼 Supervisor Agent reads from the same memory to coordinate next steps
+
+Why This Matters
+Move beyond single-agent tools — Letta allows you to build entire agent teams that reason, act, and remember together.
