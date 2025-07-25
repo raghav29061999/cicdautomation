@@ -1,119 +1,27 @@
-MemGPT is a research-backed framework for equipping LLMs with virtual memory management, simulating RAM and disk-like behavior. Letta, evolved from MemGPT, builds on these ideas and extends them with a full developer-facing platform.
+✅ Slide 6: LangChain – Long-Term Memory Agent
+📌 What is it?
+LangChain’s Long-Term Memory Agent is an LLM-based agent architecture designed to persist memory across interactions, allowing agents to recall past conversations, tasks, or context.
 
---------------
+🔍 Key Features
+🧠 Persistent Memory Integration
+Uses LangChain’s memory modules (e.g. VectorStoreRetrieverMemory, ConversationBufferMemory) to store context over long-term sessions.
 
-Why Letta for MemGPT?
-🧠 Memory Modules: Easily plug in working memory, long-term memory, and memory paging logic
+🔁 Tool-Enabled Agents
+Supports tools, functions, and plugins — letting the agent recall information, browse documents, or use APIs while keeping memory intact.
 
-🧪 Experimentation Sandbox: Letta offers a visual and programmable space to explore how MemGPT agents:
+🏗️ Customizable Chains & Prompts
+You can define how memory is summarized, retrieved, and injected into the prompt.
 
-Manage memory overflow
+💬 Multi-turn Conversational Flow
+Retains historical user inputs and responses, ideal for applications like tutoring, coaching, or dialogue-based agents.
 
-Swap information between short-term and long-term storage
+🛠️ Architecture Overview
+🧱 Components:
 
-Recall and forget based on time or priority
+Agent Executor: Runs the main agent logic
 
-💡 Ideal for Learning: Letta breaks down complex memory operations into visible, editable components
+Tools: Search, code, math, APIs
 
+Memory Module: Stores & retrieves conversation context
 
-----------------
-
-
-<code>
-
-flowchart TD
-    A[User Browser] -->|Types Prompt| B[Next.js Frontend]
-    B --> C[Letta API - SDK]
-    C --> D[Letta Server]
-    D --> E[LLM Agent]
-    E --> F[Memory Config - default-agents.json]
-    D --> G[Cookie Session Manager]
-
-    style A fill:#E0F7FA
-    style B fill:#E3F2FD
-    style C fill:#BBDEFB
-    style D fill:#FFF3E0
-    style E fill:#E8F5E9
-    style F fill:#F3E5F5
-    style G fill:#FFECB3
-</code>
-
-What is the Letta Chatbot Template?
-A prebuilt web app stack (Next.js, React, TypeScript) that integrates with Letta to build and deploy ChatGPT-like AI chatbots that retain memory across sessions.
-
-Key Features
-📁 Static Agent Configuration: Agent persona, model, and memory defined in default-agents.json
-
-🔐 Cookie-Based Session Tracking: Anonymous, persistent chat history per browser session
-
-🛠️ Modern Stack: Built with Next.js 15+, Shadcn UI, and Letta’s TypeScript SDK
-
-
-
-Quickstart Steps
-Run a Letta server locally (via Docker or Letta Desktop)
-
-Clone and configure the chatbot template repo
-
-Define agents and launch the chatbot on localhost:3000
-
-
---------------------
-
-
-<code>
-flowchart TD
-    subgraph Agents
-        S[Supervisor Agent]
-        W[Worker Agent]
-    end
-
-    S --> M[Shared Memory Block - Org: Letta]
-    W --> M
-
-    S -->|Reads Updates| M
-    W -->|Writes Results| M
-
-    subgraph Letta_Server
-        API[Letta Python SDK]
-        MsgTool[Custom Messaging Tool]
-        BlockMgr[Memory Manager]
-    end
-
-    MsgTool -->|Send Msg| W
-    API --> S
-    API --> W
-    BlockMgr --> M
-
-    style S fill:#E1F5FE
-    style W fill:#F1F8E9
-    style M fill:#EDE7F6
-    style MsgTool fill:#FFECB3
-
-</code>
-🤖 Slide 5: Multi-Agent Collaboration with Shared Memory in Letta
-Letta for Multi-Agent Systems
-Letta enables developers to build collaborative agents that can message each other and share memory blocks — supporting coordination, delegation, and team behavior among AI agents.
-
-Features for Multi-Agent Communication
-🔁 Asynchronous Messaging via Letta API:
-
-Send commands from a supervisor to a worker
-
-Trigger actions dynamically from custom tools
-
-📦 Shared Memory Blocks:
-
-Multiple agents can attach to the same memory block
-
-Updates by one agent are instantly visible to others
-
-Perfect for syncing plans, context, or task outcomes
-
-Example Architecture
-👷 Worker Agent writes task result to shared memory
-
-🧑‍💼 Supervisor Agent reads from the same memory to coordinate next steps
-
-Why This Matters
-Move beyond single-agent tools — Letta allows you to build entire agent teams that reason, act, and remember together.
+🔗 Built using LangChain’s Agent + Tool + Memory architecture
