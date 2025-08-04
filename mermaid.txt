@@ -1,19 +1,105 @@
-3 different types of memories for AI agents
+PROMPT 1:
+🔍 Unified Prompt: Data Quality Validation, Engineering Recommendations, and Correction Pipeline
+You are operating in a three-phase role to assess, improve, and transform a provided pandas DataFrame named df. Follow the process below with clear, structured output.
 
-1 semantic memory: Basically facts. Facts that have been learned in school for an Human same for an agent. Facts based on or about a user
-2 Episodic: Experiances. THings that have been done. Past agent actions
-3 Procedural: Instructions. Insticts or motor skills. Agent System prompt
+🔎 Phase 1: Data Quality Assessment (Role: Data Quality Engineer)
+Conduct a comprehensive, column-wise analysis of the DataFrame df. For each column, assess the following:
+
+Data Type & Format
+Identify the current data type and validate it against expected usage.
+
+Missing Data
+
+Count and percentage of missing values (NaN, null, empty strings).
+
+Invalid or Unexpected Values
+
+Incorrect data types or formats
+
+Values outside expected domains or business rules
+
+Outliers (Numerical Columns)
+
+Use IQR or Z-score methods to detect anomalies
+
+Duplicates
+
+Detect full-row or key-column duplicates
+
+Categorical Inconsistencies
+
+Inconsistent spellings, casing, or formats in categorical values
+
+Text Anomalies (Text Columns)
+
+Unusual patterns, unexpected symbols, or abnormal lengths
+
+Summary of Issues
+
+Concise bullet list of all data quality concerns per column
+
+👉 End this phase with a brief summary of:
+
+Major quality issues
+
+Most affected columns
+
+Any systemic patterns or notable data trends
+
+🧠 Phase 2: Engineering Recommendations (Role: Senior Data Engineer)
+Based on the findings in Phase 1, propose explicit, actionable corrections for each issue. For every column or row-level problem:
+
+Suggest appropriate techniques such as:
+
+Imputation (mean, median, mode, constant, forward/backward fill)
+
+Data type conversion
+
+Outlier handling (removal, capping, transformation)
+
+Deduplication
+
+Standardization of categories (casing, typos, normalization)
+
+Text cleaning (lowercasing, trimming, removing unwanted symbols)
+
+Domain enforcement (value mapping or bounding)
+
+Column dropping (if irreparable or irrelevant)
+
+For each suggestion:
+
+Clearly justify the rationale
+
+Ensure the methods are practical and robust
+
+🛠️ Phase 3: Data Correction & Final Output (Role: Data Reconstructor)
+Apply all approved transformations from Phase 2 directly to the original DataFrame df.
+
+Return the following:
+
+✅ Summary of All Applied Transformations
+Brief description of what was changed and why
+
+📦 Cleaned DataFrame Output
+Return the final transformed DataFrame as df_cleaned reflecting all corrections
+
+🔁 Input Specification:
+The input will be provided as a pandas DataFrame named df. Process the data programmatically using pandas operations.
+
+Output Format (strictly):
+
+css
+Copy
+Edit
+A) Data Quality Analysis & Key Takeaways
+
+B) Engineering Change Proposals
+
+C) Corrected DataFrame Output (df_cleaned)
+Use professional, concise, and technically sound language throughout your response.
 
 
-Two ways of agent interacting with memory
+---------------------------------------------------
+PROMPT2:
 
-1 Hot path - User message is hand to hand updated in memory. You have have one agent. Complicated for multiple agents
-2 Background Updation - flip to hot path. No latency, now you have 2 agents to manage
-
-in this we will build an email responder
-
-triages the incoming agent, if the email is worth responding passes it to second agent and calender action happens
-FOr this first type of memory we are giving it is Semantic Mempory. Tools for wrtting memory and for reading memory
-Hot path will be used. 
-
-then we will use Episodic memory with few shot examples and background memory
