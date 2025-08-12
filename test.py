@@ -1,13 +1,35 @@
-import re, string
+# ====================== imports ======================
+import re, string, math
 import numpy as np
 import pandas as pd
-from sklearn.cluster import KMeans, AgglomerativeClustering
-from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
-from sklearn.preprocessing import normalize
+from collections import defaultdict
+from typing import List, Tuple, Dict
+
+# Embeddings
 from sentence_transformers import SentenceTransformer
 
-# ---------- Configurable rule registry ----------
-RULES = {
+# Optional: lemmatization (NLTK)
+import nltk
+from nltk.stem import WordNetLemmatizer
+from nltk.corpus import wordnet
+# Ensure wordnet is available
+try:
+    _ = wordnet.synsets('word')
+except LookupError:
+    nltk.download('wordnet')
+    nltk.download('omw-1.4')
+
+from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
+from sklearn.preprocessing import normalize
+from sklearn.metrics.pairwise import cosine_similarity
+
+# ================== configurable rules ==================
+DOMAIN_STOP = set(ENGLISH_STOP_WORDS) | {
+    "potential","possibly","issue","issues","vulnerability","vulnerabilities",
+    "found","detected","observed","present","may","might","could","risk","risks"
+}
+
+PHRASE_RULES = {
     r"\bsql injection\b|\bsqli\b|sql\s*(vuln|injection)": "sql_injection",
     r"(hard[-\s]?coded|hardcoded).*(key|token|secret|credential)s?": "hardcoded_keys",
     r"(api\s*key|access\s*key|secret\s*key|token|secret)s?.*(exposed|leaked|public|committed|pushed|in code)": "credentials_exposed",
@@ -16,76 +38,192 @@ RULES = {
     r"(xss|cross[-\s]?site scripting)": "xss",
     r"(csrf|cross[-\s]?site request forgery)": "csrf",
     r"(ssrf|server[-\s]?side request forgery)": "ssrf",
-    # add more below anytime...
-}
-
-_COMPILED = [(re.compile(pat, re.I), tag) for pat, tag in RULES.items()]
-
-def register_rules(new_rules: dict[str, str]):
-    """new_rules: {regex: tag}"""
-    global RULES, _COMPILED
-    RULES.update(new_rules)
-    _COMPILED = [(re.compile(pat, re.I), tag) for pat, tag in RULES.items()]
-
-# Examples of adding 2–3 more types (you can change these to match your data)
-register_rules({
+    # Add any more you observe frequently:
     r"(missing|no)\s*rate[-\s]?limit(ing)?": "missing_rate_limiting",
     r"(weak|insecure)\s*(ssl|tls)|tls\s*1\.0|ssl\s*v[23]": "weak_tls_ssl",
     r"(open|public)\s*(s3|bucket)|bucket\s*policy\s*public": "open_storage_bucket",
-})
-
-# ---------- Cleaning & normalization ----------
-_DOMAIN_STOP = set(ENGLISH_STOP_WORDS) | {
-    "potential","possibly","issue","issues","vulnerability","vulnerabilities",
-    "found","detected","observed","present","may","might","could",
 }
 
-_PLACEHOLDERS = [
+COMPILED_RULES = [(re.compile(pat, re.I), tag) for pat, tag in PHRASE_RULES.items()]
+
+TOKEN_MAP = {
+    "sqli": "sql_injection", "xss":"xss", "csrf":"csrf","ssrf":"ssrf",
+    "hard-code":"hardcoded", "hardcode":"hardcoded", "hard-coded":"hardcoded",
+    "credential":"credentials","creds":"credentials",
+    "token":"tokens","key":"keys","leak":"leaked","expose":"exposed",
+}
+
+PLACEHOLDERS = [
     (re.compile(r"https?://\S+", re.I), "<url>"),
     (re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"), "<ip>"),
     (re.compile(r"[A-Za-z]:\\[^\s]+|/[^ \t\n\r\f\v]+"), "<path>"),
     (re.compile(r"[0-9a-f]{32,64}", re.I), "<hash>"),
-    (re.compile(r"\b\d+\b"), "<num>"),
     (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "<email>"),
+    (re.compile(r"\b\d+\b"), "<num>"),
 ]
+
+# ================== preprocessing ==================
+_wnl = WordNetLemmatizer()
 
 def _basic_clean(t: str) -> str:
     t = str(t).lower()
-    for pat, repl in _PLACEHOLDERS: t = pat.sub(repl, t)
+    for pat, repl in PLACEHOLDERS:
+        t = pat.sub(repl, t)
     t = t.translate(str.maketrans("", "", string.punctuation))
-    return re.sub(r"\s+", " ", t).strip()
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
 
-def normalize_with_rules(text: str, boost=2):
-    t = _basic_clean(text)
+def _apply_phrase_rules(t: str) -> Tuple[str, set]:
     tags = set()
-    for pat, tag in _COMPILED:
+    for pat, tag in COMPILED_RULES:
         if pat.search(t):
-            # collapse phrase to canonical tag to unify wording
             t = pat.sub(tag, t)
             tags.add(tag)
-    # light token cleanup + domain stopwords
-    toks = [w for w in t.split() if w not in _DOMAIN_STOP and len(w) > 2]
-    # bias embeddings toward detected archetypes
-    for _ in range(max(0, boost)):
-        toks.extend(tags)
-    return " ".join(toks), sorted(tags)
+    return t, tags
 
-# ---------- Embeddings & fixed-k clustering ----------
-def embed_texts(texts, model="all-MiniLM-L6-v2"):
-    return SentenceTransformer(model).encode(texts, convert_to_numpy=True, normalize_embeddings=True)
+def _lemmatize_token(w: str) -> str:
+    # try verb then noun (cheap & robust)
+    lem = _wnl.lemmatize(w, 'v')
+    lem = _wnl.lemmatize(lem, 'n')
+    return lem
 
-def cluster_fixed_k(emb, k=5, method="kmeans", random_state=42):
-    if method == "kmeans":
-        from sklearn.cluster import KMeans
-        return KMeans(n_clusters=k, init="k-means++", n_init=20, max_iter=500, random_state=random_state).fit_predict(emb)
-    else:
-        from sklearn.cluster import AgglomerativeClustering
-        return AgglomerativeClustering(n_clusters=k, metric="cosine", linkage="average").fit_predict(emb)
+def normalize_security_text(text: str, tag_boost:int=2) -> Tuple[str, List[str]]:
+    """
+    1) lowercase + placeholders
+    2) phrase rules -> canonical tags (sql_injection, hardcoded_keys, ...)
+    3) token-level normalization: synonym map + lemmatization
+    4) drop domain stopwords, short tokens
+    5) append detected tags (boost) to influence embeddings
+    """
+    t = _basic_clean(text)
+    t, tags = _apply_phrase_rules(t)
 
-# ---------- c-TF-IDF labeling ----------
-def ctfidf_labels(df, text_col, cluster_col, top_n=5):
+    toks = []
+    for w in t.split():
+        w = TOKEN_MAP.get(w, w)
+        w = _lemmatize_token(w)
+        if len(w) > 2 and w not in DOMAIN_STOP:
+            toks.append(w)
+
+    if tags:
+        for _ in range(max(0, tag_boost)):
+            toks.extend(tags)
+
+    return " ".join(toks), sorted(list(tags))
+
+# ================== embeddings ==================
+def embed_texts(texts: List[str], model_name="all-MiniLM-L6-v2") -> np.ndarray:
+    model = SentenceTransformer(model_name)
+    # L2-normalized embeddings help cosine-based thresholds
+    return model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
+
+# ================== streaming (threshold) clustering ==================
+class OnlineCosineClustering:
+    """
+    Assign each vector to the nearest centroid if cosine_sim >= threshold;
+    otherwise start a new cluster. Centroids are updated (mean).
+    Designed for batch + incremental.
+    """
+    def __init__(self, threshold: float = 0.78):
+        self.threshold = threshold
+        self.centroids: Dict[int, np.ndarray] = {}
+        self.members: Dict[int, List[int]] = defaultdict(list)
+        self._next_id = 0
+
+    @staticmethod
+    def _cos_sim(a: np.ndarray, b: np.ndarray) -> float:
+        return float(np.clip(np.dot(a, b) / (np.linalg.norm(a)*np.linalg.norm(b) + 1e-12), -1.0, 1.0))
+
+    def _best_cluster(self, vec: np.ndarray) -> Tuple[int, float]:
+        if not self.centroids:
+            return -1, -1.0
+        ids = list(self.centroids.keys())
+        C = np.vstack([self.centroids[i] for i in ids])
+        sims = cosine_similarity(vec.reshape(1,-1), C).ravel()
+        j = int(np.argmax(sims))
+        return ids[j], float(sims[j])
+
+    def _update_centroid(self, cid: int, vecs: np.ndarray, indices: List[int]):
+        # mean of member vectors
+        self.centroids[cid] = vecs[indices].mean(axis=0)
+        self.centroids[cid] /= (np.linalg.norm(self.centroids[cid]) + 1e-12)
+
+    def fit_predict(self, X: np.ndarray) -> np.ndarray:
+        labels = np.full(X.shape[0], -1, dtype=int)
+        for i, v in enumerate(X):
+            best_id, best_sim = self._best_cluster(v)
+            if best_sim >= self.threshold:
+                labels[i] = best_id
+                self.members[best_id].append(i)
+                self._update_centroid(best_id, X, self.members[best_id])
+            else:
+                cid = self._next_id
+                self._next_id += 1
+                self.centroids[cid] = v / (np.linalg.norm(v) + 1e-12)
+                self.members[cid].append(i)
+                labels[i] = cid
+        return labels
+
+    def partial_predict(self, X_new: np.ndarray) -> np.ndarray:
+        """Assign incoming batch to existing clusters or new ones."""
+        out = np.full(X_new.shape[0], -1, dtype=int)
+        for i, v in enumerate(X_new):
+            best_id, best_sim = self._best_cluster(v)
+            if best_sim >= self.threshold:
+                out[i] = best_id
+                self.members[best_id].append(-(i+1))  # mark as new (optional)
+                # Update centroid with new vec (EMA to be gentle)
+                self.centroids[best_id] = normalize((self.centroids[best_id] + v).reshape(1,-1)).ravel()
+            else:
+                cid = self._next_id
+                self._next_id += 1
+                self.centroids[cid] = v / (np.linalg.norm(v) + 1e-12)
+                out[i] = cid
+        return out
+
+# ================== merge clusters to exactly K ==================
+def merge_to_k(centroids: Dict[int, np.ndarray], labels: np.ndarray, k_target: int = 5) -> Tuple[np.ndarray, Dict[int, np.ndarray]]:
+    """
+    Greedy agglomerative merge by highest centroid cosine similarity until #clusters == k_target.
+    Returns new_labels, new_centroids (ids are re-numbered 0..k-1 for cleanliness).
+    """
+    # Prepare working sets
+    ids = sorted(set(labels))
+    id_to_idx = {cid: np.where(labels == cid)[0].tolist() for cid in ids}
+    cen = {cid: centroids[cid].copy() for cid in ids}
+
+    def cos(a, b): return float(np.dot(a,b) / (np.linalg.norm(a)*np.linalg.norm(b) + 1e-12))
+
+    while len(cen) > k_target:
+        cids = list(cen.keys())
+        # find closest pair
+        best = (-1, -1, -2.0)
+        for i in range(len(cids)):
+            for j in range(i+1, len(cids)):
+                s = cos(cen[cids[i]], cen[cids[j]])
+                if s > best[2]:
+                    best = (cids[i], cids[j], s)
+        a, b, _ = best
+        # merge b into a
+        members = id_to_idx[a] + id_to_idx[b]
+        centroid = normalize(np.mean([centroids[a], centroids[b]], axis=0).reshape(1,-1)).ravel()
+        id_to_idx[a] = members
+        cen[a] = centroid
+        # remove b
+        del id_to_idx[b]
+        del cen[b]
+
+    # Re-label to 0..k-1
+    new_ids = list(cen.keys())
+    remap = {cid: i for i, cid in enumerate(new_ids)}
+    new_labels = np.array([remap[c] for c in labels])
+    new_centroids = {remap[cid]: vec for cid, vec in cen.items()}
+    return new_labels, new_centroids
+
+# ================== labeling with c-TF-IDF ==================
+def ctfidf_labels(df: pd.DataFrame, text_col: str, cluster_col: str, top_n: int = 5) -> Dict[int, str]:
     grp = df.groupby(cluster_col)[text_col].apply(lambda s: " ".join(s)).reset_index()
-    vec = TfidfVectorizer(ngram_range=(1,3), max_features=8000, stop_words=list(_DOMAIN_STOP))
+    vec = TfidfVectorizer(ngram_range=(1,3), max_features=10000, stop_words=list(DOMAIN_STOP))
     X = normalize(vec.fit_transform(grp[text_col]), norm="l2", axis=1)
     vocab = np.array(vec.get_feature_names_out())
     out = {}
@@ -95,67 +233,62 @@ def ctfidf_labels(df, text_col, cluster_col, top_n=5):
         out[cid] = " | ".join(vocab[idx])
     return out
 
-# ---------- Main API ----------
-def cluster_security_k5(df: pd.DataFrame, issue_col="issue", method="kmeans", label_top_n=5, tag_boost=2):
+# ================== main API ==================
+def cluster_security_streaming_to_k(
+    df: pd.DataFrame,
+    issue_col: str = "issue",
+    similarity_threshold: float = 0.80,
+    k_target: int = 5,
+    tag_boost: int = 3,
+    model_name: str = "all-MiniLM-L6-v2",
+):
+    """
+    - Strong preprocessing (placeholders + phrase rules + lemmatization + synonyms + tag boosting)
+    - Online cosine clustering with threshold (assign to existing cluster if similar, else new)
+    - Greedy centroid merges to force exactly k_target clusters
+    - c-TF-IDF labeling
+    Returns: df_out, labels_dict, centroids
+    """
     if issue_col not in df.columns:
         raise ValueError(f"{issue_col} not in dataframe")
+
+    # 1) Normalize text
     cleaned, tags = [], []
     for x in df[issue_col].astype(str).tolist():
-        c, tg = normalize_with_rules(x, boost=tag_boost)
-        cleaned.append(c); tags.append(tg)
-    emb = embed_texts(cleaned)
-    labels = cluster_fixed_k(emb, k=5, method=method)
+        nx, tg = normalize_security_text(x, tag_boost=tag_boost)
+        cleaned.append(nx); tags.append(tg)
+
+    # 2) Embeddings
+    emb = embed_texts(cleaned, model_name=model_name)
+
+    # 3) Online clustering with cosine threshold
+    online = OnlineCosineClustering(threshold=similarity_threshold)
+    raw_labels = online.fit_predict(emb)  # raw cluster ids (variable count)
+
+    # 4) Merge to exactly K clusters
+    merged_labels, merged_centroids = merge_to_k(online.centroids, raw_labels, k_target=k_target)
+
+    # 5) Build output + labels
     out = df.copy()
     out["normalized_issue"] = cleaned
     out["detected_tags"] = tags
-    out["cluster"] = labels
-    name_map = ctfidf_labels(out, "normalized_issue", "cluster", top_n=label_top_n)
+    out["cluster"] = merged_labels
+
+    name_map = ctfidf_labels(out, text_col="normalized_issue", cluster_col="cluster", top_n=6)
     out["cluster_label"] = out["cluster"].map(name_map)
-    return out, name_map, emb
 
-# ---------- Optional: discover new archetypes to add as rules ----------
-def discover_new_archetypes(df: pd.DataFrame, issue_col="issue", min_group_size=8):
-    """
-    Clusters only the rows that matched NO rule, and proposes top n-grams as candidates.
-    """
-    mask_no_rule = df["detected_tags"].apply(lambda t: len(t) == 0)
-    if not mask_no_rule.any():
-        return pd.DataFrame(columns=["size","example","suggested_terms"])
-    sub = df.loc[mask_no_rule].copy()
-    if sub.empty or sub.shape[0] < min_group_size:
-        return pd.DataFrame(columns=["size","example","suggested_terms"])
-    # quick mini-discovery with agglomerative k=3 (tweak if you want)
-    emb = embed_texts(sub[issue_col].astype(str).tolist())
-    lbl = cluster_fixed_k(emb, k=min(3, max(2, len(sub)//min_group_size)), method="agglomerative")
-    sub["tmp_cluster"] = lbl
-    # label mini-clusters with TF-IDF to propose patterns
-    props = []
-    for cid, g in sub.groupby("tmp_cluster"):
-        vec = TfidfVectorizer(ngram_range=(1,3), stop_words=list(_DOMAIN_STOP))
-        X = vec.fit_transform(g[issue_col].astype(str).tolist())
-        vocab = np.array(vec.get_feature_names_out())
-        row = normalize(X.sum(axis=0)).A.ravel()
-        idx = row.argsort()[::-1][:5]
-        props.append({
-            "size": len(g),
-            "example": g[issue_col].iloc[0],
-            "suggested_terms": ", ".join(vocab[idx])
-        })
-    return pd.DataFrame(props).sort_values("size", ascending=False)
-////
+    return out, name_map, merged_centroids
+//////
 
+# df: your dataframe with column 'issue'
+df5, labels5, centroids = cluster_security_streaming_to_k(
+    df,
+    issue_col="issue",
+    similarity_threshold=0.80,  # tighten/loosen as needed; try 0.78–0.85
+    k_target=5,
+    tag_boost=3,                # increase if SQL/hardcoded variants still split
+    model_name="all-MiniLM-L6-v2"
+)
 
-# 1) Run clustering with 5 topics
-out, labels, emb = cluster_security_k5(df, issue_col="issue", method="kmeans")
-
-# 2) See results
-print(out['cluster'].value_counts().sort_index())
-print(labels)
-
-# 3) If clusters still mix, try agglomerative
-# out, labels, emb = cluster_security_k5(df, issue_col="issue", method="agglomerative")
-
-# 4) Discover new archetypes from unmatched rows → add to RULES
-suggestions = discover_new_archetypes(out, issue_col="issue")
-print(suggestions.head())
-# Then convert a suggested phrase into a regex + tag via register_rules({...}) and rerun.
+print(df5['cluster'].value_counts().sort_index())
+print(labels5)
