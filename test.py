@@ -182,42 +182,38 @@ class OnlineCosineClustering:
         return out
 
 # ================== merge clusters to exactly K ==================
-def merge_to_k(centroids: Dict[int, np.ndarray], labels: np.ndarray, k_target: int = 5) -> Tuple[np.ndarray, Dict[int, np.ndarray]]:
+def merge_to_k(centroids: Dict[int, np.ndarray], labels: np.ndarray, k_target: int = 5):
     """
-    Greedy agglomerative merge by highest centroid cosine similarity until #clusters == k_target.
-    Returns new_labels, new_centroids (ids are re-numbered 0..k-1 for cleanliness).
+    Merge clusters greedily by highest cosine similarity until number of clusters == k_target.
+    Updates labels during merging so there are no stale IDs.
     """
-    # Prepare working sets
-    ids = sorted(set(labels))
-    id_to_idx = {cid: np.where(labels == cid)[0].tolist() for cid in ids}
-    cen = {cid: centroids[cid].copy() for cid in ids}
+    def cos(a, b):
+        return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12))
 
-    def cos(a, b): return float(np.dot(a,b) / (np.linalg.norm(a)*np.linalg.norm(b) + 1e-12))
-
+    cen = {cid: centroids[cid].copy() for cid in set(labels)}
     while len(cen) > k_target:
         cids = list(cen.keys())
-        # find closest pair
         best = (-1, -1, -2.0)
         for i in range(len(cids)):
-            for j in range(i+1, len(cids)):
+            for j in range(i + 1, len(cids)):
                 s = cos(cen[cids[i]], cen[cids[j]])
                 if s > best[2]:
                     best = (cids[i], cids[j], s)
         a, b, _ = best
-        # merge b into a
-        members = id_to_idx[a] + id_to_idx[b]
-        centroid = normalize(np.mean([centroids[a], centroids[b]], axis=0).reshape(1,-1)).ravel()
-        id_to_idx[a] = members
-        cen[a] = centroid
-        # remove b
-        del id_to_idx[b]
+
+        # Merge b into a
+        labels[labels == b] = a
+        # recompute centroid a
+        a_vecs = [centroids[idx] for idx in labels if idx == a]  # This line needs actual vectors; we have cen[a] + cen[b]
+        cen[a] = normalize((cen[a] + cen[b]).reshape(1, -1)).ravel()
         del cen[b]
 
-    # Re-label to 0..k-1
-    new_ids = list(cen.keys())
-    remap = {cid: i for i, cid in enumerate(new_ids)}
+    # Relabel to 0..k-1
+    unique_ids = sorted(set(labels))
+    remap = {cid: i for i, cid in enumerate(unique_ids)}
     new_labels = np.array([remap[c] for c in labels])
     new_centroids = {remap[cid]: vec for cid, vec in cen.items()}
+
     return new_labels, new_centroids
 
 # ================== labeling with c-TF-IDF ==================
