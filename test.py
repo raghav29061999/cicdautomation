@@ -1,4 +1,3 @@
-# --- imports (self-contained) ---
 import re, string
 import numpy as np
 import pandas as pd
@@ -7,101 +6,156 @@ from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
 from sklearn.preprocessing import normalize
 from sentence_transformers import SentenceTransformer
 
-# ---------- helpers ----------
-def _preprocess_text(t: str) -> str:
+# ---------- Configurable rule registry ----------
+RULES = {
+    r"\bsql injection\b|\bsqli\b|sql\s*(vuln|injection)": "sql_injection",
+    r"(hard[-\s]?coded|hardcoded).*(key|token|secret|credential)s?": "hardcoded_keys",
+    r"(api\s*key|access\s*key|secret\s*key|token|secret)s?.*(exposed|leaked|public|committed|pushed|in code)": "credentials_exposed",
+    r"(password)s?.*(hardcoded|in code|exposed|plaintext)": "password_exposed",
+    r"\b(open redirect|open redirection)\b": "open_redirect",
+    r"(xss|cross[-\s]?site scripting)": "xss",
+    r"(csrf|cross[-\s]?site request forgery)": "csrf",
+    r"(ssrf|server[-\s]?side request forgery)": "ssrf",
+    # add more below anytime...
+}
+
+_COMPILED = [(re.compile(pat, re.I), tag) for pat, tag in RULES.items()]
+
+def register_rules(new_rules: dict[str, str]):
+    """new_rules: {regex: tag}"""
+    global RULES, _COMPILED
+    RULES.update(new_rules)
+    _COMPILED = [(re.compile(pat, re.I), tag) for pat, tag in RULES.items()]
+
+# Examples of adding 2–3 more types (you can change these to match your data)
+register_rules({
+    r"(missing|no)\s*rate[-\s]?limit(ing)?": "missing_rate_limiting",
+    r"(weak|insecure)\s*(ssl|tls)|tls\s*1\.0|ssl\s*v[23]": "weak_tls_ssl",
+    r"(open|public)\s*(s3|bucket)|bucket\s*policy\s*public": "open_storage_bucket",
+})
+
+# ---------- Cleaning & normalization ----------
+_DOMAIN_STOP = set(ENGLISH_STOP_WORDS) | {
+    "potential","possibly","issue","issues","vulnerability","vulnerabilities",
+    "found","detected","observed","present","may","might","could",
+}
+
+_PLACEHOLDERS = [
+    (re.compile(r"https?://\S+", re.I), "<url>"),
+    (re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"), "<ip>"),
+    (re.compile(r"[A-Za-z]:\\[^\s]+|/[^ \t\n\r\f\v]+"), "<path>"),
+    (re.compile(r"[0-9a-f]{32,64}", re.I), "<hash>"),
+    (re.compile(r"\b\d+\b"), "<num>"),
+    (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "<email>"),
+]
+
+def _basic_clean(t: str) -> str:
     t = str(t).lower()
-    t = re.sub(r'\d+', ' ', t)
-    t = t.translate(str.maketrans('', '', string.punctuation))
-    words = [w for w in t.split() if w not in ENGLISH_STOP_WORDS and len(w) > 2]
-    return ' '.join(words)
+    for pat, repl in _PLACEHOLDERS: t = pat.sub(repl, t)
+    t = t.translate(str.maketrans("", "", string.punctuation))
+    return re.sub(r"\s+", " ", t).strip()
 
-def _embed_texts(texts, model_name='all-MiniLM-L6-v2'):
-    model = SentenceTransformer(model_name)
-    # normalized embeddings help clustering stability
-    emb = model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
-    return emb
+def normalize_with_rules(text: str, boost=2):
+    t = _basic_clean(text)
+    tags = set()
+    for pat, tag in _COMPILED:
+        if pat.search(t):
+            # collapse phrase to canonical tag to unify wording
+            t = pat.sub(tag, t)
+            tags.add(tag)
+    # light token cleanup + domain stopwords
+    toks = [w for w in t.split() if w not in _DOMAIN_STOP and len(w) > 2]
+    # bias embeddings toward detected archetypes
+    for _ in range(max(0, boost)):
+        toks.extend(tags)
+    return " ".join(toks), sorted(tags)
 
-def _cluster_fixed_k(X: np.ndarray, k=5, method='kmeans', random_state=42):
-    if method == 'kmeans':
-        km = KMeans(n_clusters=k, init='k-means++', n_init=20, max_iter=500, random_state=random_state)
-        return km.fit_predict(X)
-    elif method == 'agglomerative':
-        # average-link with cosine tends to work well for sentence embeddings
-        ag = AgglomerativeClustering(n_clusters=k, metric='cosine', linkage='average')
-        return ag.fit_predict(X)
+# ---------- Embeddings & fixed-k clustering ----------
+def embed_texts(texts, model="all-MiniLM-L6-v2"):
+    return SentenceTransformer(model).encode(texts, convert_to_numpy=True, normalize_embeddings=True)
+
+def cluster_fixed_k(emb, k=5, method="kmeans", random_state=42):
+    if method == "kmeans":
+        from sklearn.cluster import KMeans
+        return KMeans(n_clusters=k, init="k-means++", n_init=20, max_iter=500, random_state=random_state).fit_predict(emb)
     else:
-        raise ValueError("method must be 'kmeans' or 'agglomerative'")
+        from sklearn.cluster import AgglomerativeClustering
+        return AgglomerativeClustering(n_clusters=k, metric="cosine", linkage="average").fit_predict(emb)
 
-def _ctfidf_labels(df: pd.DataFrame, text_col: str, cluster_col: str, top_n=4):
-    """
-    Class-based TF-IDF over concatenated docs per cluster → better topic labels.
-    """
-    # build one "document" per cluster
-    grouped = df.groupby(cluster_col)[text_col].apply(lambda s: ' '.join(s)).reset_index()
-    clusters = grouped[cluster_col].tolist()
-    docs = grouped[text_col].tolist()
-
-    vec = TfidfVectorizer(ngram_range=(1,3), max_features=6000, stop_words='english')
-    X = vec.fit_transform(docs)                   # shape: n_clusters x vocab
-    X = normalize(X, norm='l2', axis=1)           # highlight salient terms per cluster
+# ---------- c-TF-IDF labeling ----------
+def ctfidf_labels(df, text_col, cluster_col, top_n=5):
+    grp = df.groupby(cluster_col)[text_col].apply(lambda s: " ".join(s)).reset_index()
+    vec = TfidfVectorizer(ngram_range=(1,3), max_features=8000, stop_words=list(_DOMAIN_STOP))
+    X = normalize(vec.fit_transform(grp[text_col]), norm="l2", axis=1)
     vocab = np.array(vec.get_feature_names_out())
-
-    labels = {}
-    for i, cid in enumerate(clusters):
+    out = {}
+    for i, cid in enumerate(grp[cluster_col].tolist()):
         row = X[i].toarray().ravel()
         idx = row.argsort()[::-1][:top_n]
-        labels[cid] = ' | '.join(vocab[idx])
-    return labels
+        out[cid] = " | ".join(vocab[idx])
+    return out
 
-# ---------- main API ----------
-def cluster_to_five_topics(df: pd.DataFrame, issue_col='issue', method='kmeans', label_top_n=4):
-    """
-    From-scratch pipeline:
-    - cleans text (no reliance on df['cleaned'])
-    - sentence embeddings
-    - fixed-k clustering (k=5)
-    - c-TF-IDF labeling
-    Returns: df_out (original + cluster + cluster_label), labels_dict, embeddings
-    """
+# ---------- Main API ----------
+def cluster_security_k5(df: pd.DataFrame, issue_col="issue", method="kmeans", label_top_n=5, tag_boost=2):
     if issue_col not in df.columns:
-        raise ValueError(f"Column '{issue_col}' not found in dataframe.")
-
-    # 1) Clean (kept internal; original df untouched)
-    texts = df[issue_col].astype(str).apply(_preprocess_text).tolist()
-
-    # 2) Embed
-    emb = _embed_texts(texts)  # shape: (n_samples, d)
-
-    # 3) Cluster (exactly 5)
-    labels = _cluster_fixed_k(emb, k=5, method=method)
-
-    # 4) Build labeled output dataframe
+        raise ValueError(f"{issue_col} not in dataframe")
+    cleaned, tags = [], []
+    for x in df[issue_col].astype(str).tolist():
+        c, tg = normalize_with_rules(x, boost=tag_boost)
+        cleaned.append(c); tags.append(tg)
+    emb = embed_texts(cleaned)
+    labels = cluster_fixed_k(emb, k=5, method=method)
     out = df.copy()
-    out['cluster'] = labels
+    out["normalized_issue"] = cleaned
+    out["detected_tags"] = tags
+    out["cluster"] = labels
+    name_map = ctfidf_labels(out, "normalized_issue", "cluster", top_n=label_top_n)
+    out["cluster_label"] = out["cluster"].map(name_map)
+    return out, name_map, emb
 
-    # 5) c-TF-IDF labels for meaning
-    # Use the cleaned texts for labeling quality
-    tmp = out[[issue_col]].copy()
-    tmp['_cleaned_'] = texts
-    tmp['cluster'] = labels
-    label_map = _ctfidf_labels(tmp, text_col='_cleaned_', cluster_col='cluster', top_n=label_top_n)
+# ---------- Optional: discover new archetypes to add as rules ----------
+def discover_new_archetypes(df: pd.DataFrame, issue_col="issue", min_group_size=8):
+    """
+    Clusters only the rows that matched NO rule, and proposes top n-grams as candidates.
+    """
+    mask_no_rule = df["detected_tags"].apply(lambda t: len(t) == 0)
+    if not mask_no_rule.any():
+        return pd.DataFrame(columns=["size","example","suggested_terms"])
+    sub = df.loc[mask_no_rule].copy()
+    if sub.empty or sub.shape[0] < min_group_size:
+        return pd.DataFrame(columns=["size","example","suggested_terms"])
+    # quick mini-discovery with agglomerative k=3 (tweak if you want)
+    emb = embed_texts(sub[issue_col].astype(str).tolist())
+    lbl = cluster_fixed_k(emb, k=min(3, max(2, len(sub)//min_group_size)), method="agglomerative")
+    sub["tmp_cluster"] = lbl
+    # label mini-clusters with TF-IDF to propose patterns
+    props = []
+    for cid, g in sub.groupby("tmp_cluster"):
+        vec = TfidfVectorizer(ngram_range=(1,3), stop_words=list(_DOMAIN_STOP))
+        X = vec.fit_transform(g[issue_col].astype(str).tolist())
+        vocab = np.array(vec.get_feature_names_out())
+        row = normalize(X.sum(axis=0)).A.ravel()
+        idx = row.argsort()[::-1][:5]
+        props.append({
+            "size": len(g),
+            "example": g[issue_col].iloc[0],
+            "suggested_terms": ", ".join(vocab[idx])
+        })
+    return pd.DataFrame(props).sort_values("size", ascending=False)
+////
 
-    out['cluster_label'] = out['cluster'].map(label_map)
 
-    return out, label_map, emb
+# 1) Run clustering with 5 topics
+out, labels, emb = cluster_security_k5(df, issue_col="issue", method="kmeans")
 
+# 2) See results
+print(out['cluster'].value_counts().sort_index())
+print(labels)
 
+# 3) If clusters still mix, try agglomerative
+# out, labels, emb = cluster_security_k5(df, issue_col="issue", method="agglomerative")
 
-
-/////////////////////
-
-# df is your dataframe with a column 'issue'
-df5, labels5, emb = cluster_to_five_topics(df, issue_col='issue', method='kmeans')  # or method='agglomerative'
-
-print(df5['cluster'].value_counts().sort_index())
-print(labels5)  # cluster -> label
-
-# peek examples per cluster
-for c in sorted(df5['cluster'].unique()):
-    print(f"\n=== Cluster {c} | {labels5[c]} ===")
-    print(df5.loc[df5['cluster']==c, 'issue'].head(5).to_string(index=False))
+# 4) Discover new archetypes from unmatched rows → add to RULES
+suggestions = discover_new_archetypes(out, issue_col="issue")
+print(suggestions.head())
+# Then convert a suggested phrase into a regex + tag via register_rules({...}) and rerun.
