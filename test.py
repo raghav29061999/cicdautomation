@@ -1,78 +1,186 @@
-SEED_SPEC_FUNC = {
-    # 1) Ambiguous + Redundant
-    "Ambiguous/Redundant Code": [
-        "redundant", "duplicate code", "ambiguous column", "ambiguous column reference",
-        "ambiguous column name", "unclear naming", "unclear reference"
-    ],
-    # 2) Commented-out code (your ask to name this)
-    "Commented-Out Code Present": [
-        "commented out code", "commented code block", "commented block contains logic",
-        "unfinished functionality commented", "dead code", "disabled code"
-    ],
-    # 3) Hardcoded values
-    "Hardcoded Values": [
-        "hardcoded column name", "hardcoded business number", "hardcoded dataset name",
-        "hardcoded file path", "magic number", "constant value", "inline config", "literal value"
-    ],
-    # 4) Merged bucket: incomplete + incorrect + inconsistent (+ assumptions/calcs)
-    "Incomplete/Incorrect/Inconsistent Implementation": [
-        "incomplete code", "incomplete data", "incomplete implementation",
-        "lack of data filtering", "no data filtering", "lack of error handling",
-        "no error handling", "no data processing", "no transformation",
-        "incorrect calculation", "incorrect column mapping", "incorrect conversion",
-        "incorrect handling", "incorrect logic",
-        "inconsistent column naming", "inconsistent data types", "inconsistent handling of path",
-        "incorrect assumption", "assumes", "assumption not valid"
-    ],
-    # 5) Inefficient (keep separate)
-    "Inefficient Implementation": [
-        "inefficient computation", "inefficient data archiving", "inefficient deduplication",
-        "inefficient processing", "inefficient retrieval", "inefficient sorting",
-        "multiple complex conditions", "large number of operations", "suboptimal performance",
-        "not optimized"
-    ],
-    # 6) Inefficient Query (query-specific)
-    "Inefficient Query": [
-        "inefficient query", "inefficient subquery", "subquery slow", "full table scan",
-        "select *", "cartesian join", "missing index", "poor query performance", "n+1 query"
-    ],
-    # 7) Potential risks/issues
-    "Potential Risks/Issues": [
-        "potential data loss", "potential null values", "potential performance issue",
-        "potential rounding issue", "may return large dataset", "could lead to", "might result in"
-    ],
-}
+import re
+import numpy as np
+import pandas as pd
+from typing import Dict, List, Union
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import linear_kernel
+
+# Optional word cloud (QA only)
+import matplotlib.pyplot as plt
+try:
+    from wordcloud import WordCloud
+    _WORDCLOUD = True
+except Exception:
+    _WORDCLOUD = False
 
 
-NOISSUE_FUNC_STRONG = [
-    r"^\s*[-*]?\s*no\s+(apparent|known|major|significant)?\s*(functionalit(y|y\s+related)\s+)?issues?\s*(found|identified|detected|observed|reported)?\b",
-    r"^\s*[-*]?\s*no\s+issues?\s+identified\b",
-    r"^\s*[-*]?\s*no\s+functionality\s+issues?\s+identified\b",
-    r"^\s*[-*]?\s*the\s+code\s+appears\s+to\s+(?:function|be\s*functional|be\s*functioning)\b",
-]
-NOISSUE_FUNC_SECONDARY = [
-    r"\bno\s+(functionality\s+)?issues?\s*(found|identified|detected|observed|reported)?\b",
-    r"\bappears\s+to\s+be\s+functional\b",
-    r"\bappears\s+to\s+be\s+functioning\b",
-]
-NOISSUE_FUNC_EXCLUSIONS = r"\b(except|but|however|though|nevertheless|yet|still|apart\s+from|except\s+for)\b"
+# ---------------------- Utilities ----------------------
+def _clean_text(t: str) -> str:
+    if not isinstance(t, str):
+        return ""
+    s = t.lower()
+    s = re.sub(r"https?://\S+", " url ", s)
+    s = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", " email ", s)
+    s = re.sub(r"[A-Fa-f0-9]{32,}", " hex ", s)  # long hashes/uuids/keys
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
-NOISSUE_CONFIG_FUNC = {
-    "strong": NOISSUE_FUNC_STRONG,
-    "secondary": NOISSUE_FUNC_SECONDARY,
-    "exclusions": NOISSUE_FUNC_EXCLUSIONS,
-}
+def _compile_list(patterns: List[Union[str, re.Pattern]]) -> List[re.Pattern]:
+    out = []
+    for p in (patterns or []):
+        out.append(p if isinstance(p, re.Pattern) else re.compile(p, re.I))
+    return out
 
-df_functional_labeled = assign_issue_names_with_clouds(
-    functional_df,
-    SEED_SPEC_FUNC,
-    NOISSUE_CONFIG_FUNC,
-    text_col="DESCRIPTION",
-    sim_threshold=0.15,     # lower to 0.12 if many fall into Unclustered
-    ngram_range=(1, 2),     # try (1,3) for broader matching
-    use_char_ngrams=False,  # True can help with short/code-y strings
-    make_clouds=False       # True to render QA word clouds
-)
+def _is_no_issue_text(s: str,
+                      compiled_strong: List[re.Pattern],
+                      compiled_secondary: List[re.Pattern],
+                      compiled_exclusions: Union[re.Pattern, None]) -> bool:
+    if not s:
+        return False
+    if compiled_strong and any(p.search(s) for p in compiled_strong):
+        return True
+    if compiled_secondary and any(p.search(s) for p in compiled_secondary):
+        if not (compiled_exclusions and compiled_exclusions.search(s)):
+            return True
+    return False
 
-print(df_functional_labeled["ISSUE_NAME"].value_counts(dropna=False))
+def _cloud(texts: List[str], title: str, max_words: int = 150):
+    if not texts:
+        return
+    if _WORDCLOUD:
+        wc = WordCloud(width=1100, height=650, background_color="white",
+                       collocations=False, max_words=max_words)
+        img = wc.generate(" ".join(texts))
+        plt.figure(figsize=(10,6)); plt.imshow(img); plt.axis("off"); plt.title(title); plt.show()
+    else:
+        # Fallback: TF-IDF bar chart
+        vec = TfidfVectorizer(ngram_range=(1,2), min_df=3, max_df=0.9,
+                              sublinear_tf=True, strip_accents="unicode")
+        X = vec.fit_transform(texts)
+        means = np.asarray(X.mean(axis=0)).ravel()
+        terms = vec.get_feature_names_out()
+        idx = np.argsort(-means)[:30]
+        plt.figure(figsize=(10,6))
+        plt.barh(range(len(idx)), means[idx][::-1])
+        plt.yticks(range(len(idx)), terms[idx][::-1])
+        plt.title(f"Top terms — {title}")
+        plt.gca().invert_yaxis()
+        plt.show()
 
+
+# ---------------------- Main (dynamic) ----------------------
+def assign_issue_names_with_clouds(
+    df: pd.DataFrame,
+    seed_spec: Dict[str, List[str]],
+    noissue_config: Dict[str, Union[List[Union[str, re.Pattern]], str, re.Pattern]] = None,
+    *,
+    text_col: str = "DESCRIPTION",
+    sim_threshold: float = 0.15,
+    ngram_range=(1, 2),
+    min_df: int = 3,
+    max_df: float = 0.90,
+    use_char_ngrams: bool = False,
+    make_clouds: bool = False,
+    no_issue_label: str = "No Issues",
+    unclustered_label: str = "Unclustered",
+) -> pd.DataFrame:
+    """
+    Dynamically assigns ISSUE_NAME using seed-guided TF-IDF cosine similarity + optional 'No Issues' regex.
+
+    ISSUE_NAME ∈ {all keys of seed_spec} ∪ {no_issue_label, unclustered_label}
+
+    Args:
+        df: input dataframe
+        seed_spec: {label -> [synonyms/phrases, ...]} (any number of labels)
+        noissue_config: {
+            "strong": [regex or compiled],
+            "secondary": [regex or compiled],
+            "exclusions": regex or compiled
+        } or None (to disable)
+        text_col: text column name
+        sim_threshold: cosine threshold to accept nearest seed; else unclustered_label
+        ngram_range/min_df/max_df/use_char_ngrams: TF-IDF settings
+        make_clouds: render overall & per-class word clouds for QA
+        no_issue_label / unclustered_label: customize output labels
+    Returns:
+        Original df + ISSUE_NAME column
+    """
+    if text_col not in df.columns:
+        raise KeyError(f"Column '{text_col}' not found in dataframe")
+
+    # Prepare No-Issue regex (optional)
+    strong = secondary = compiled_exc = None
+    if noissue_config:
+        strong = _compile_list(noissue_config.get("strong"))
+        secondary = _compile_list(noissue_config.get("secondary"))
+        exc = noissue_config.get("exclusions")
+        compiled_exc = exc if isinstance(exc, re.Pattern) else (re.compile(exc, re.I) if exc else None)
+
+    # Clean + detect No Issues
+    out = df.copy()
+    out[text_col] = out[text_col].fillna("").astype(str)
+    out["_clean"] = out[text_col].map(_clean_text)
+    if noissue_config:
+        noissue_mask = out["_clean"].map(lambda s: _is_no_issue_text(s, strong, secondary, compiled_exc))
+    else:
+        noissue_mask = pd.Series(False, index=out.index)
+
+    if make_clouds:
+        _cloud(out["_clean"].tolist(), "Overall corpus")
+
+    # If no seeds provided, everything is either No Issues or Unclustered
+    seed_labels = list(seed_spec.keys()) if seed_spec else []
+    if len(seed_labels) == 0:
+        assigned = np.where(noissue_mask, no_issue_label, unclustered_label)
+        out["ISSUE_NAME"] = assigned
+        out.drop(columns=["_clean"], inplace=True)
+        if make_clouds:
+            for label in [no_issue_label, unclustered_label]:
+                subset = out.loc[out["ISSUE_NAME"].eq(label), text_col].tolist()
+                if subset:
+                    _cloud(subset, f"{label} ({len(subset)})")
+        return out
+
+    # Build seed strings ("Label | synonyms") for shared TF-IDF space
+    seed_texts = []
+    for lbl in seed_labels:
+        syns = seed_spec.get(lbl, []) or []
+        # allow users to pass either list of phrases or already 'label | terms' style
+        seed_texts.append((lbl + " | " + " ".join(syns)).strip())
+
+    # Vectorize docs + seeds
+    vec_word = TfidfVectorizer(ngram_range=ngram_range, min_df=min_df, max_df=max_df,
+                               sublinear_tf=True, strip_accents="unicode")
+    X_docs = vec_word.fit_transform(out["_clean"].tolist())
+    X_seeds = vec_word.transform(seed_texts)
+
+    # Optionally add char n-grams (helpful for code-like short strings)
+    if use_char_ngrams:
+        from scipy.sparse import hstack
+        vec_char = TfidfVectorizer(analyzer="char_wb", ngram_range=(3,5),
+                                   min_df=min_df, max_df=max_df, sublinear_tf=True)
+        Xc_docs = vec_char.fit_transform(out["_clean"].tolist())
+        Xc_seeds = vec_char.transform(seed_texts)
+        X_docs = hstack([X_docs, Xc_docs], format="csr")
+        X_seeds = hstack([X_seeds, Xc_seeds], format="csr")
+
+    # Cosine similarity → nearest seed (or unclustered_label)
+    sims = linear_kernel(X_docs, X_seeds)  # (n_docs, n_seeds)
+    best_ix = sims.argmax(axis=1)
+    best_sim = sims[np.arange(sims.shape[0]), best_ix]
+    best_labels = np.array(seed_labels, dtype=object)[best_ix]
+
+    assigned = np.where(best_sim >= sim_threshold, best_labels, unclustered_label)
+    assigned = np.where(noissue_mask, no_issue_label, assigned)
+
+    out["ISSUE_NAME"] = assigned
+    out.drop(columns=["_clean"], inplace=True)
+
+    if make_clouds:
+        for label in seed_labels + [no_issue_label, unclustered_label]:
+            subset = out.loc[out["ISSUE_NAME"].eq(label), text_col].tolist()
+            if subset:
+                _cloud(subset, f"{label} ({len(subset)})")
+
+    return out
