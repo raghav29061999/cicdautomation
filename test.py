@@ -1,152 +1,91 @@
-SEED_SPEC_FUNC_BETTER = {
-    # Ambiguous + Redundant
-    "Ambiguous/Redundant Code": [
-        "ambiguous column", "ambiguous reference", "ambiguous naming", "unclear name",
-        "unclear reference", "confusing mapping", "duplicate code", "redundant code",
-        "unnecessary code", "repeated logic", "shadowed variable", "unused variable", "unused import"
+SEED_SPEC_COMPLEX = {
+    # 1) Complexity of logic/structure
+    "High/Overly Complex Logic & Structure": [
+        "high complexity", "overly complex", "complex query", "complex logic",
+        "nested calculations", "nested case statements", "nested conditional logic",
+        "deep nesting", "nested queries", "nested subqueries", "complex join condition",
+        "date calculation", "date manipulation", "lambda functions", "loops",
+        "large number of conditions", "conditional logic", "complicated query structure"
     ],
 
-    # Commented-out
-    "Commented-Out Code Present": [
-        "commented out code", "commented code block", "commented block contains logic",
-        "commented business logic", "dead code", "disabled code", "leftover code",
-        "temporary commented", "debug code commented", "TODO commented"
+    # 2) Excessive steps/functions/ops
+    "Excessive Operations / Overuse of Functions": [
+        "excessive conditional logic", "too many configuration params", "too many parameters",
+        "excessive feature engineering", "excessive grouping", "excessive logging",
+        "excessive filtering", "excessive nesting", "too many aggregates",
+        "too many columns", "too many joins", "excessive string manipulations",
+        "overuse of functions", "over engineered"
     ],
 
-    # Hardcoded values
-    "Hardcoded Values": [
-        "hardcoded value", "hard-coded value", "magic number", "literal value",
-        "inline constant", "fixed value", "static value",
-        "hardcoded file path", "hardcoded path", "absolute path",
-        "hardcoded column name", "hardcoded dataset name", "hardcoded url",
-        "inline config", "env value in code"
+    # 3) Hardcoding
+    "Hardcoding Issues": [
+        "hardcoded column names", "hardcoded dataset name", "hardcoded schema",
+        "hardcoded table", "hardcoded date", "hardcoded feature",
+        "hardcoded filter condition", "magic numbers", "literal values",
+        "hardcoded project key", "hardcoded value"
     ],
 
-    # Merged quality problems
-    "Incomplete/Incorrect/Inconsistent Implementation": [
-        # incomplete / missing
-        "incomplete code", "incomplete implementation", "partial implementation",
-        "placeholder function", "stub function", "todo not implemented",
-        "lack of data filtering", "missing filter", "no error handling", "no exception handling",
-        "no data processing", "no transformation", "missing validation",
-        # incorrect
-        "incorrect calculation", "wrong calculation", "calculation is incorrect",
-        "incorrect mapping", "wrong mapping", "incorrect conversion", "incorrect cast",
-        "incorrect logic", "incorrect handling", "off by one",
-        # inconsistent
-        "inconsistent column naming", "inconsistent naming", "inconsistent data types",
-        "inconsistent dtype", "inconsistent path handling", "mismatched schema", "type mismatch",
-        # assumptions/calcs
-        "incorrect assumption", "assumes without validation", "assumption not valid",
-        "uses default without check"
+    # 4) Inefficiency / optimization
+    "Inefficient / Optimization Needed": [
+        "suboptimal query", "potential performance issue", "inefficient column renaming",
+        "inefficient computation", "inefficient concatenation",
+        "inefficient data manipulation", "inefficient processing",
+        "inefficient transformation", "inefficient date range filtering",
+        "inefficient handling missing values", "inefficient merging",
+        "could be optimized", "can be optimized", "optimize code", "slow performance"
     ],
 
-    # Inefficient (non-query)
-    "Inefficient Implementation": [
-        "inefficient computation", "inefficient processing", "inefficient retrieval",
-        "inefficient sorting", "inefficient archiving", "inefficient deduplication",
-        "suboptimal performance", "not optimized", "slow loop", "nested loop",
-        "row by row processing", "non vectorized", "brute force", "high time complexity",
-        "o(n^2) complexity", "recomputes repeatedly", "multiple complex conditions"
+    # 5) Clarity/maintainability (incl. commented-out)
+    "Clarity & Maintainability Gaps": [
+        "lack of clarity", "missing column aliases", "missing comments",
+        "missing documentation", "missing context", "no error handling",
+        "lack of error handling", "non descriptive variable names",
+        "lack of modularity", "lack of parametrization", "poor readability",
+        "commented out code", "commented code block", "dead code", "disabled code"
     ],
 
-    # Inefficient (query-specific)
-    "Inefficient Query": [
-        "inefficient query", "inefficient subquery", "slow query", "expensive query",
-        "full table scan", "table scan", "missing index", "no index used",
-        "select *", "cartesian join", "cross join", "n+1 query", "poor cardinality",
-        "unfiltered join", "no where clause", "no partition pruning", "no predicate pushdown",
-        "no limit", "no group by needed", "bad join order", "skewed join", "excessive shuffles"
-    ],
-
-    # Potential risks/issues (aiming for high recall)
-    "Potential Risks/Issues": [
-        "potential issue", "potential data loss", "potential null values",
-        "potential performance issue", "potential rounding issue", "possible overflow",
-        "possible precision loss", "possible truncation",
-        "may return large dataset", "may return null", "may not handle edge cases",
-        "might fail on edge cases", "could lead to error", "could result in failure",
-        "risk of timeout", "risk of deadlock", "risk of memory leak",
-        "likely to fail", "susceptible to error", "prone to failure"
+    # 6) Redundant/repetitive/boilerplate
+    "Redundant / Repetitive Code": [
+        "redundant code", "repeated code", "repetitive code", "duplicate code",
+        "unnecessary repetition", "boilerplate repeated", "duplicate logic"
     ],
 }
 
-
-REGEX_BOOSTS_FUNC_BETTER = {
-    "Ambiguous/Redundant Code": [
-        r"\bambig(?:u|)ous\b", r"\bambig(?:u|)ous\s+(?:col(?:umn)?|name|ref(?:erence)?)\b",
-        r"\bredundan(?:t|cy)\b", r"\bduplicate\s+code\b", r"\bunused\s+(?:var|variable|import)\b",
-        r"\bshadow(?:ed|ing)\s+var"
-    ],
-
-    "Commented-Out Code Present": [
-        r"\bcommented[-\s]?out\b", r"\bcommented\s+code\b", r"\bcommented\s+block\b",
-        r"\bdead\s+code\b", r"\bdisabled\s+code\b", r"\bcommented.*logic\b"
-    ],
-
-    "Hardcoded Values": [
-        r"\bhard[-\s]?cod(?:e|ed)\b", r"\bmagic\s+number\b", r"\bliteral\s+value\b|\binline\s+constant\b",
-        r"\bhardcoded\s+(?:file|path|url|column|dataset|name)s?\b", r"\babsolute\s+path\b"
-    ],
-
-    "Incomplete/Incorrect/Inconsistent Implementation": [
-        r"\bincomplete\b|\bpartial\s+implementation\b|\bnot\s+implemented\b|\bplaceholder\b|\bstub\b",
-        r"\black\s+of\s+data\s+filter(?:ing)?\b|\bmissing\s+filter\b",
-        r"\bno\s+(?:error|exception)\s+handling\b|\bno\s+(?:data\s+processing|transformation)\b",
-        r"\bincorrect\s+calculat\w*\b|\bcalculat\w*\s+(?:is|are)\s+incorrect\b",
-        r"\bincorrect\s+(?:mapping|conversion|cast|logic|handling)\b|\bwrong\s+(?:calc|mapping)\b",
-        r"\binconsistent\b|\bmismatch(?:ed)?\s+(?:type|schema)\b|\btype\s+mismatch\b",
-        r"\bincorrect\s+assumption\b|\bassumes\b"
-    ],
-
-    "Inefficient Implementation": [
-        r"^\s*inefficient\b", r"\bsuboptimal\b|\bnot\s+optimized\b",
-        r"\bnon[-\s]?vectori[sz]ed\b|\brow[-\s]?by[-\s]?row\b|\bnested\s+loop\b|\bslow\s+loop\b",
-        r"\bo\(?n\^?2\)?\b|\bo\(\s*n\s*\^\s*2\s*\)\b", r"\brecompute[s]?\s+repeatedly\b"
-    ],
-
-    "Inefficient Query": [
-        r"\binefficient\s+(?:query|subquery)\b", r"\bslow\s+query\b|\bexpensive\s+query\b",
-        r"\bfull\s+table\s+scan\b|\btable\s+scan\b", r"\bmissing\s+index\b|\bno\s+index\b",
-        r"\bselect\s*\*\b", r"\b(cartesian|cross)\s+join\b", r"\bn\+1\s+query\b",
-        r"\bno\s+where\b|\bno\s+filter\b|\bno\s+limit\b",
-        r"\bno\s+partition\s+(?:pruning|filter)\b|\bno\s+predicate\s+pushdown\b",
-        r"\bbad\s+join\s+order\b|\bskewed\s+join\b|\bexcessive\s+shuffle"
-    ],
-
-    # Heavily expanded Potential patterns
-    "Potential Risks/Issues": [
-        r"^\s*potential(?:ly)?\b",
-        r"\bpotential\s+(?:issue|risk|data\s+loss|null\s+values?|performance|rounding|overflow|precision|truncation|timeout|deadlock|leak)\b",
-        r"\b(?:risk|risk\s+of)\b",
-        r"\b(?:may|might|could|can)\s+(?:cause|lead|result|return|fail)\b",
-        r"\bmay\s+return\s+large\s+data(?:set|s)?\b|\bmay\s+return\s+null\b",
-        r"\bedge\s*cases?\s*(?:not\s*handled|unhandled|missing)\b",
-        r"\b(?:does|do)\s+not\s+handle\s+edge\s*cases\b|\bmay\s*not\s+handle\b",
-        r"\bpossible\b|\bpossibly\b|\blikely\b|\bprone\s+to\b|\bsusceptible\s+to\b"
-    ],
+NOISSUE_COMPLEX_STRONG = [
+    r"^\s*[-*]?\s*no\s+(apparent|known|major|significant)?\s*(complexity|complex)\s+issues?\s*(found|identified|detected|observed|reported)?\b",
+    r"^\s*[-*]?\s*no\s+issues?\s+identified\b",
+    r"^\s*[-*]?\s*simple\s+(?:query|code)\s+(?:with\s+)?no\s+optimization\s+needed\b",
+    r"^\s*[-*]?\s*simplistic\s+(?:code\s+structure|data\s+transformation)\b"
+]
+NOISSUE_COMPLEX_SECONDARY = [
+    r"\bno\s+(complexity|complex)\s+issues?\b",
+    r"\bno\s+issues?\s+(?:found|identified|detected|observed|reported)\b",
+    r"\bsimple\s+(?:query|code)\b"
+]
+NOISSUE_COMPLEX_EXCLUSIONS = (
+    r"\b(except|but|however|though|nevertheless|yet|still|apart\s+from|except\s+for|"
+    r"potential|risk|inefficient|optimi[sz]e|complex|performance|slow|suboptimal)\b"
+)
+NOISSUE_CONFIG_COMPLEX = {
+    "strong": NOISSUE_COMPLEX_STRONG,
+    "secondary": NOISSUE_COMPLEX_SECONDARY,
+    "exclusions": NOISSUE_COMPLEX_EXCLUSIONS,
 }
 
 
-df_functional_labeled = assign_issue_names_with_clouds(
-    functional_df,
-    seed_spec=SEED_SPEC_FUNC_BETTER,
-    noissue_config=NOISSUE_CONFIG_FUNC,     # with stronger exclusions applied
+df_complexity_labeled = assign_issue_names_with_clouds(
+    complexity_df,                         # <- your dataframe with DESCRIPTION
+    seed_spec=SEED_SPEC_COMPLEX,
+    noissue_config=NOISSUE_CONFIG_COMPLEX,
     text_col="DESCRIPTION",
-    sim_threshold=0.13,                     # a bit looser
-    ngram_range=(1, 3),                     # broader phrase coverage
-    use_char_ngrams=True,                   # typo robustness (e.g., “potental”, “ambigous”)
+    sim_threshold=0.14,                    # slightly looser for recall
+    ngram_range=(1, 3),                    # capture more phrasing variants
+    use_char_ngrams=True,                  # typo/short-token robustness
     token_pattern=r"(?u)\b[\w\./+\-*=:%]+\b",
-    regex_boosts=REGEX_BOOSTS_FUNC_BETTER,
-    boost_weight=0.45,                      # strong nudge toward matches
-    force_on_regex=False,                   # keep global False
+    regex_boosts=REGEX_BOOSTS_COMPLEX,
+    boost_weight=0.45,                     # strong nudge toward matches
+    force_on_regex=False,                  # set True if you want regex to hard-assign
+    make_clouds=False
 )
 
-# Optional: guarantee Potential when regex hits (only for this label)
-_pats = [re.compile(p, re.I) for p in REGEX_BOOSTS_FUNC_BETTER["Potential Risks/Issues"]]
-mask_potential = functional_df["DESCRIPTION"].fillna("").str.lower().map(lambda s: any(p.search(s) for p in _pats))
-df_functional_labeled.loc[mask_potential, "ISSUE_NAME"] = "Potential Risks/Issues"
-
-# Check counts
-print(df_functional_labeled["ISSUE_NAME"].value_counts(dropna=False))
-
+print(df_complexity_labeled["ISSUE_NAME"].value_counts(dropna=False))
