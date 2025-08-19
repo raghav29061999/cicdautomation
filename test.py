@@ -1,5 +1,6 @@
-Proposed Solutions
+# Add these to your existing *exclusions* regex for the relevant scenario (functional/security)
+NOISSUE_EXCLUSIONS_STRONGER = r"\b(except|but|however|though|nevertheless|yet|still|apart\s+from|except\s+for|"
+NOISSUE_EXCLUSIONS_STRONGER += r"potential|risk|could|might|may|possibly|possible|caveat|concern|limitation|improvement)\b"
 
-Fix data & re-run: Validate upstream inputs for today, remove duplicates/late records or correct mappings, then re-run recipe_np.
-
-Adjust the threshold (if 13 is expected): Update the rule limit (or use a variance-based/dynamic baseline), test in lower env, and promote to prod.
+NOISSUE_CONFIG_FUNC["exclusions"] = NOISSUE_EXCLUSIONS_STRONGER
+# (Do the same for your security no-issue config if needed.)
