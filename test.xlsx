@@ -1,0 +1,22 @@
+API Type	Endpoint	Use Case
+POST	/auth/signup	Customer registration (create account)
+POST	/auth/login	Customer login, get tokens
+POST	/customers/{customer_id}/kyc	Upload customer KYC documents
+POST	/devices	Register device with static attributes
+POST	/media/uploads	Request presigned URL for media upload
+POST	/media/uploads/{upload_id}/complete	Confirm media upload completion
+POST	/submissions	Create new self-evaluation submission
+PATCH	/submissions/{submission_id}	Attach answers, media, self-tests, and submit
+GET	/submissions/{submission_id}/offer	Retrieve pre-valuation price range and confidence
+POST	/offers/{offer_id}/decision	Customer accepts or declines an offer
+POST	/pickups	Schedule a pickup after offer acceptance
+GET	/pickups/{pickup_id}	Track pickup status
+PATCH	/pickups/{pickup_id}/status	Update pickup status (by agent)
+POST	/assessments	Create assessment (onsite, recheck, or final QC)
+POST	/assessments/{assessment_id}/reconcile	Reconcile customer vs agent assessments
+POST	/submissions/{submission_id}/rechecks	Trigger self-recheck from pickup agent
+POST	/pickups/{pickup_id}/confirm	Confirm device pickup after reconciliation
+POST	/offers	Create final offer after QC assessment
+POST	/payouts	Initiate payout for accepted offer
+GET	/payouts/{payout_id}	Check payout status
+POST	/loyalty/credits	Award loyalty points for recycling option
