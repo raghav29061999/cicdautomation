@@ -1,67 +1,11 @@
-1. What is Strands (Community Project)
-
-Strands Agents started as an open-source SDK designed to simplify the development of autonomous AI agents. The project introduced a model-first approach — treating the foundation model as the core intelligence — and provided a flexible, extensible framework to enable reasoning, tool use, and autonomous workflows.
-
-Key principles of Strands (original):
-
-Model-First Design: Instead of orchestrating around tools or graphs, Strands emphasized the foundation model’s reasoning loop (“Agent Loop”) as the central construct.
-
-Openness: The SDK was built to integrate not only with AWS services, but also with third-party components and standards such as the Model Context Protocol (MCP).
-
-Extensibility: Strands provided a growing ecosystem of “tools” that agents could invoke (e.g., APIs, functions), along with the ability for developers to easily create custom tools.
-
-Multimodal Capabilities: From the beginning, Strands supported text, speech, and image-based interactions for richer agent workflows.
-
-Community-Led Development: Released under open-source license, Strands encouraged developers to experiment and extend agent behavior across domains.
-
-The philosophy was to build a lightweight, open, and flexible agent SDK that could power experimentation and production-ready autonomous systems.
-
-
-
-
------------------
-
-
-2. What is AWS Strands (Enterprise Evolution)
-
-Recognizing the potential of Strands, AWS adopted and formalized Strands Agents within its Agentic AI Prescriptive Guidance and open-source initiatives. AWS positioned Strands as its reference open-source framework for building AI agents, tightly coupled with the AWS ecosystem.
-
-Enhancements as AWS Strands:
-
-Deeper AWS Service Integration: Native support for Amazon Bedrock, AWS Lambda, Step Functions, and other services for orchestration, monitoring, and deployment.
-
-Production Observability: Out-of-the-box OpenTelemetry (OTEL) support, traceability, and telemetry pipelines for monitoring agent workflows at scale.
-
-Security & Guardrails: Integration with AWS Bedrock Guardrails for PII detection, content filtering, and responsible AI enforcement.
-
-Foundation Model Options: Easy access to multiple AWS-hosted models (Anthropic Claude, Amazon Nova family, etc.), with support for non-AWS providers via LLM APIs.
-
-Standardization: Full compliance with MCP (Model Context Protocol) to ensure portability and consistency of agent context across providers.
-
-Ecosystem Growth: AWS documentation, blogs, and prescriptive guidance elevated Strands from a developer-focused SDK to an enterprise-ready framework.
-
-In short, Strands became “AWS Strands” when Amazon formally backed and integrated the SDK into its AI agent strategy. This shift meant the project retained its open-source DNA, but was strengthened with enterprise features (security, observability, AWS-native integrations) needed for large-scale adoption.
-                                                                                                                                              
-
-                                                                                                                                                                                                                                
-                                                                                                                                                                                                                                
-                                                                                                                                                                                                                                
-
-
-
-                                                                                                                                                                                                                                
-
-                                                                                                                                                                                                                                
-
-
-                                                                                                                                                                                                                                
-                                                                                                                                                                                                                                
-                                                                                                                                                                                                                                
-                                                                                                                                                                                                                                
-                                                                                                                                                                                                                                
-                                                                                                                                                                                                                                
-                                                                                                                                                                                                                                
-                                                                                                                                                                                                                                
-                                                                                                                                                                                                                                
-                                                                                                                                                                                                                                
-                                                                                                                                                                                                            
+| **Dimension**               | **Strands (Original Open-Source SDK)**                                        | **AWS Strands (Enterprise Evolution)**                                                                                                                               |
+| --------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Core Philosophy**         | Model-first design with **Agent Loop** as central construct.                  | Same model-first design, but positioned as the **AWS reference SDK** for AI agents.                                                                                  |
+| **Ecosystem Openness**      | Fully open — integrates with any LLM API, external services, or custom tools. | Still open (supports **non-AWS LLMs** via API integration and **MCP standard**), but with **first-class AWS service support**.                                       |
+| **Integrations**            | Third-party APIs and services through custom connectors.                      | Native AWS integrations (Bedrock, Lambda, Step Functions, S3, DynamoDB, CloudWatch). Can also plug into **CloudTrail** for logging/compliance.                       |
+| **Foundation Models**       | Multiple providers via API (OpenAI, Anthropic, HuggingFace, etc.).            | Access to **Amazon Bedrock** models (Claude, Nova, Titan, etc.) plus support for **external models** (e.g., OpenAI, Anthropic directly) through LLM API integration. |
+| **Observability**           | Basic logging, developer-managed monitoring.                                  | **Full observability**: OpenTelemetry (OTEL) support, CloudWatch metrics, CloudTrail integration for audit logs.                                                     |
+| **Security & Guardrails**   | Developer-managed (often via wrappers like LangSmith or custom filters).      | **Built-in Responsible AI features**: Bedrock Guardrails (PII filtering, content moderation, compliance logging).                                                    |
+| **Extensibility (Tools)**   | Custom Python tools and lightweight ecosystem.                                | Same extensibility + **AWS service toolkits** (S3 ops, DynamoDB queries, Bedrock agents, API Gateway calls).                                                         |
+| **Deployment Model**        | Deploy anywhere (multi-cloud, on-prem, containers).                           | Optimized for AWS cloud, but still deployable outside AWS since SDK is open-source.                                                                                  |
+| **Community vs Enterprise** | Community-driven, innovation-oriented.                                        | Backed by **AWS prescriptive guidance, enterprise docs, ecosystem partnerships**.                                                                                    |
