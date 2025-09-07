@@ -1,27 +1,26 @@
-# app/main.py
-from typing import Optional, Any, Dict
-from fastapi import FastAPI
-from pydantic import BaseModel, field_validator, StrictStr
+flowchart LR
+    A[User Request] --> B[LLM - OpenAI / Anthropic]
+    B --> C{{Agent Type\nZero-shot / Structured-Chat}}
+    C --> D[Tools\nadd, subtract, multiply, divide...]
+    D --> E[Final Answer]
 
-class CalcRequest(BaseModel):
-    task: StrictStr
-    a: Optional[float] = None
-    b: Optional[float] = None
-    var: StrictStr = "x"   # <-- must be string; was likely float in your code
-
-    @field_validator("a", "b", mode="before")
-    @classmethod
-    def empty_to_none(cls, v):
-        # Convert "" to None so float parsing doesn't explode
-        if v is None:
-            return None
-        if isinstance(v, str) and v.strip() == "":
-            return None
-        return v
+    style A fill:#dae8fc,stroke:#6c8ebf
+    style B fill:#ffffff,stroke:#000000
+    style C fill:#fff2cc,stroke:#d6b656
+    style D fill:#d5e8d4,stroke:#82b366
+    style E fill:#f8cecc,stroke:#b85450
 
 
 
-{
-  "task": "differentiate x^3 + 2*x",
-  "var": "x"
-}
+
+flowchart LR
+    A[User Request] --> B[LLM - OpenAI / Anthropic / Bedrock]
+    B --> C{{Universal Agent Loop}}
+    C --> D[Tools\nadd, subtract, multiply, integrate...]
+    D --> E[Final Answer]
+
+    style A fill:#dae8fc,stroke:#6c8ebf
+    style B fill:#ffffff,stroke:#000000
+    style C fill:#fff2cc,stroke:#d6b656
+    style D fill:#d5e8d4,stroke:#82b366
+    style E fill:#f8cecc,stroke:#b85450
