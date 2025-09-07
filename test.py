@@ -1,1 +1,27 @@
-Traditionally, most agent frameworks followed a tool-first or orchestration-first approach. In this model, the developer defined a set of tools, workflows, or graphs up front, and the language model was used mainly to decide which tool to call at each step. The LLM acted more like a decision engine inside a rigid orchestration pipeline. Strands introduced a model-first approach, which flips this order: the foundation model itself becomes the primary reasoning entity, driving the workflow loop (the “Agent Loop”). Instead of hard-coding the orchestration, the LLM dynamically reasons about context, decides when to invoke tools, and adapts its behavior on the fly. This makes Strands more flexible, reduces boilerplate orchestration code, and places the intelligence squarely inside the model rather than the framework.
+# app/main.py
+from typing import Optional, Any, Dict
+from fastapi import FastAPI
+from pydantic import BaseModel, field_validator, StrictStr
+
+class CalcRequest(BaseModel):
+    task: StrictStr
+    a: Optional[float] = None
+    b: Optional[float] = None
+    var: StrictStr = "x"   # <-- must be string; was likely float in your code
+
+    @field_validator("a", "b", mode="before")
+    @classmethod
+    def empty_to_none(cls, v):
+        # Convert "" to None so float parsing doesn't explode
+        if v is None:
+            return None
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
+
+
+
+{
+  "task": "differentiate x^3 + 2*x",
+  "var": "x"
+}
