@@ -1,3 +1,38 @@
+def extract_json(text: str):
+    """
+    Extract a JSON object from model output.
+    Handles ```json fences, smart quotes, and trailing commas.
+    Returns a Python object (dict/list) or raises ValueError.
+    """
+    # 1) If fenced, capture inner
+    m = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.S | re.I)
+    if m:
+        text = m.group(1).strip()
+
+    # 2) Direct parse
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    # 3) Try the largest {...} slice
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start : end + 1]
+        # Normalize smart quotes
+        candidate = (
+            candidate.replace("\u201c", '"').replace("\u201d", '"')
+            .replace("\u2018", "'").replace("\u2019", "'")
+        )
+        # Remove trailing commas in objects/arrays
+        candidate = re.sub(r",\s*([}\]])", r"\1", candidate)
+        try:
+            return json.loads(candidate)
+        except Exception:
+            pass
+
+    raise ValueError("Could not parse JSON from model output.")
+-------
 def load_data(state: State) -> State:
     if DATA_PATH.exists():
         with open(DATA_PATH, "r", encoding="utf-8") as f:
