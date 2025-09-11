@@ -1,114 +1,126 @@
-# app/api/routes.py
-from fastapi import APIRouter, Depends, HTTPException, Request
-from .schemas import (
-    PitchRequest, PitchResponse, PortfolioScoreRequest,
-    PortfolioMonitorResult, PortfolioScore, ClientProfile, RecommendationsResult
-)
+Mermaid Sequence - Request Response Token-light
+sequenceDiagram
+    participant Postman
+    participant FastAPI as FastAPI (/pitch)
+    participant Orchestrator
+    participant PM as PortfolioMonitor
+    participant RC as Recommender
+    participant PW as PitchWriter
+    participant Tools as Tools (@tool)
+    participant OAI as Strands.OpenAIModel
 
-router = APIRouter()
+    Postman->>FastAPI: POST /pitch {client_id}
+    FastAPI->>Orchestrator: run(client_id)
+    Orchestrator->>PM: run(client_id, client_name)
+    PM->>Tools: load_client_positions, load_market_snapshot
+    Tools-->>PM: positions, market
+    PM->>Tools: score_portfolio (weights, vol, grade)
+    Tools-->>PM: score dict
+    PM->>OAI: prompt(portfolio_monitor)  (short polish)
+    OAI-->>PM: summary
+    Orchestrator->>RC: run(profile, score)
+    RC->>Tools: recommend_rebalance, tailor_to_profile, format_bullets
+    Tools-->>RC: list + bullets
+    Orchestrator->>PW: run(client_name, findings, bullets)
+    PW->>OAI: prompt(pitch)  (short synth)
+    OAI-->>PW: draft pitch
+    PW->>Tools: compliance_sanitize
+    Tools-->>PW: compliant pitch
+    Orchestrator-->>FastAPI: {client, portfolio, recs, pitch}
+    FastAPI-->>Postman: 200 OK (JSON)
 
-def get_agents(request: Request):
-    agents = getattr(request.app.state, "agents", None)
-    if not agents or "orchestrator" not in agents:
-        raise HTTPException(status_code=500, detail="Agents not initialized")
-    return agents
-
-@router.get("/health")
-def health():
-    return {"status": "ok"}
-
-@router.post("/pitch", response_model=PitchResponse)
-def make_pitch(req: PitchRequest, agents = Depends(get_agents)):
-    result = agents["orchestrator"].run(client_id=req.client_id)
-
-    profile = result["client"]
-    pm = result["portfolio"]
-    rec = result["recommendations"]
-
-    return PitchResponse(
-        client=ClientProfile(
-            client_id=profile.get("client_id", req.client_id),
-            name=profile.get("name", ""),
-            risk=profile.get("risk", "moderate"),
-            horizon=profile.get("horizon", "5y"),
-            goals=profile.get("goals", "")
-        ),
-        portfolio=PortfolioMonitorResult(
-            score=PortfolioScore(**pm["score"]),
-            summary=pm.get("summary", "")
-        ),
-        recommendations=RecommendationsResult(
-            recommendations=rec.get("recommendations", []),
-            bullets=rec.get("bullets", "")
-        ),
-        pitch=result.get("pitch", "")
-    )
-
-@router.post("/portfolio/score", response_model=PortfolioMonitorResult)
-def portfolio_score(req: PortfolioScoreRequest, agents = Depends(get_agents)):
-    orchestrator = agents["orchestrator"]
-    pm = orchestrator.portfolio_monitor.run(
-        client_id=req.client_id, client_name=req.client_id
-    )
-    return PortfolioMonitorResult(
-        score=PortfolioScore(**pm["score"]),
-        summary=pm.get("summary", "")
-    )
+-------
 
 
+flowchart LR
+    subgraph Client["Client - Postman or UI"]
+      RQ[POST pitch\nclient_id=C-1001]
+    end
 
+    subgraph API["FastAPI"]
+      RT[api routes\nrouters for pitch and portfolio_score]
+      SC[api schemas\nPydantic models]
+    end
 
+    subgraph Core["App Core"]
+      MN[main py\ncreate_app\nload env and cfg\nbuild agents]
+      CFG[configs base yaml\nmodel and agents\ntools and budget]
+    end
 
+    subgraph Orchestrator["Strands Orchestrator Agent"]
+      ORC[orchestrator py\nOrchestrator run]
+      PRV[providers py\nOpenAIModel]
+      PP[prompts_provider py\nrender prompt_name ctx]
+    end
 
+    subgraph Specialists["Specialist Agents"]
+      PM[PortfolioMonitor\nspecialists portfolio_monitor py]
+      RC[Recommender\nspecialists recommender py]
+      PW[PitchWriter\nspecialists pitch_writer py]
+    end
 
+    subgraph Prompts["Prompts - py files"]
+      P_ORC[orchestrator prompt]
+      P_PM[portfolio_monitor prompt]
+      P_RC[recommender prompt]
+      P_PW[pitch prompt]
+    end
 
+    subgraph Tools["Deterministic Tools - Strands @tool"]
+      T_IO_CLI[load_client_profile\nload_client_positions]
+      T_IO_MKT[load_market_snapshot]
+      T_WT[compute_weights]
+      T_RISK[estimate_portfolio_volatility\nconcentration_flags]
+      T_SCORE[score_portfolio]
+      T_RULES[recommend_rebalance\ntailor_to_profile]
+      T_FMT[format_recommendations_bullets]
+      T_COMP[compliance_sanitize]
+    end
 
+    subgraph Data["Demo Data"]
+      CSV[clients csv]
+      MKT[market json]
+    end
 
+    subgraph Provider["Model Provider via Strands"]
+      OAI[OpenAI\nmodel gpt-4o-mini\nparams temperature=0\nmax_tokens=256]
+    end
 
+    %% Wiring
+    RQ --> RT
+    RT --> SC
+    RT --> MN
+    MN --> CFG
+    MN --> ORC
+    ORC --> PRV
+    ORC --> PP
+    PRV --> OAI
 
------------
+    %% Orchestration path
+    ORC --> PM
+    PM --> T_IO_CLI
+    PM --> T_IO_MKT
+    PM --> T_SCORE
+    T_IO_CLI --> CSV
+    T_IO_MKT --> MKT
+    T_SCORE --> T_WT
+    T_SCORE --> T_RISK
 
+    ORC --> RC
+    RC --> T_RULES
+    RC --> T_FMT
 
+    ORC --> PW
+    PW --> T_COMP
 
+    %% Prompts used at each agent
+    ORC --> P_ORC
+    PM --> P_PM
+    RC --> P_RC
+    PW --> P_PW
 
-
-# app/main.py
-from dotenv import load_dotenv
-load_dotenv()
-
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-
-def create_app() -> FastAPI:
-    # Lazy imports to avoid any circulars
-    from app.agent.factory import load_cfg, build_agents
-    from app.api.routes import router as api_router
-
-    cfg = load_cfg("configs/base.yaml")
-    agents = build_agents(cfg)
-
-    fa = FastAPI(title="Financial Multi-Agent POC", version="0.1.0")
-    fa.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    fa.state.cfg = cfg
-    fa.state.agents = agents
-    fa.include_router(api_router)
-
-    return fa
-
-app = create_app()
-
-
-
-
-
-
+    %% Return
+    ORC --> RT
 
 
 
