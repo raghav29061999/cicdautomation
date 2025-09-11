@@ -1,52 +1,115 @@
-client_id,name,risk,horizon,goals,pos_SPY,pos_AGG,pos_VXUS
-C-1001,Ada Moderate,moderate,5y,"retirement, college",60,30,10
+# app/api/routes.py
+from fastapi import APIRouter, Depends, HTTPException, Request
+from .schemas import (
+    PitchRequest, PitchResponse, PortfolioScoreRequest,
+    PortfolioMonitorResult, PortfolioScore, ClientProfile, RecommendationsResult
+)
+
+router = APIRouter()
+
+def get_agents(request: Request):
+    agents = getattr(request.app.state, "agents", None)
+    if not agents or "orchestrator" not in agents:
+        raise HTTPException(status_code=500, detail="Agents not initialized")
+    return agents
+
+@router.get("/health")
+def health():
+    return {"status": "ok"}
+
+@router.post("/pitch", response_model=PitchResponse)
+def make_pitch(req: PitchRequest, agents = Depends(get_agents)):
+    result = agents["orchestrator"].run(client_id=req.client_id)
+
+    profile = result["client"]
+    pm = result["portfolio"]
+    rec = result["recommendations"]
+
+    return PitchResponse(
+        client=ClientProfile(
+            client_id=profile.get("client_id", req.client_id),
+            name=profile.get("name", ""),
+            risk=profile.get("risk", "moderate"),
+            horizon=profile.get("horizon", "5y"),
+            goals=profile.get("goals", "")
+        ),
+        portfolio=PortfolioMonitorResult(
+            score=PortfolioScore(**pm["score"]),
+            summary=pm.get("summary", "")
+        ),
+        recommendations=RecommendationsResult(
+            recommendations=rec.get("recommendations", []),
+            bullets=rec.get("bullets", "")
+        ),
+        pitch=result.get("pitch", "")
+    )
+
+@router.post("/portfolio/score", response_model=PortfolioMonitorResult)
+def portfolio_score(req: PortfolioScoreRequest, agents = Depends(get_agents)):
+    orchestrator = agents["orchestrator"]
+    pm = orchestrator.portfolio_monitor.run(
+        client_id=req.client_id, client_name=req.client_id
+    )
+    return PortfolioMonitorResult(
+        score=PortfolioScore(**pm["score"]),
+        summary=pm.get("summary", "")
+    )
 
 
-{"volatility": {"SPY": 0.16, "AGG": 0.05, "VXUS": 0.18}}
 
 
+
+
+
+
+
+
+
+
+-----------
+
+
+
+
+
+# app/main.py
 from dotenv import load_dotenv
-load_dotenv()  # Load OPENAI_API_KEY and any other env vars early
+load_dotenv()
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.agent.factory import load_cfg, build_agents
-from app.api.http import router as api_router
-
-
 def create_app() -> FastAPI:
-    # Load config (configs/base.yaml by default)
-    cfg = load_cfg("configs/base.yaml")
+    # Lazy imports to avoid any circulars
+    from app.agent.factory import load_cfg, build_agents
+    from app.api.routes import router as api_router
 
-    # Build agents (orchestrator + specialists as exposed by factory)
+    cfg = load_cfg("configs/base.yaml")
     agents = build_agents(cfg)
 
-    app = FastAPI(
-        title="Financial Multi-Agent POC",
-        version="0.1.0",
-        docs_url="/docs",
-        redoc_url="/redoc",
-    )
-
-    # (Optional) CORS for local tools/UI
-    app.add_middleware(
+    fa = FastAPI(title="Financial Multi-Agent POC", version="0.1.0")
+    fa.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # tighten for production
+        allow_origins=["*"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
-    # Attach state for dependency injection
-    app.state.cfg = cfg
-    app.state.agents = agents
+    fa.state.cfg = cfg
+    fa.state.agents = agents
+    fa.include_router(api_router)
 
-    # Mount API routes
-    app.include_router(api_router)
+    return fa
 
-    return app
-
-
-# FastAPI entrypoint
 app = create_app()
+
+
+
+
+
+
+
+
+
+
