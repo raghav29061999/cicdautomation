@@ -1,83 +1,130 @@
-Happy Path Flow (flowchart)
+from fastapi import FastAPI, Query
+app = FastAPI(title="MCP Portfolio (POC)")
 
-“Here’s the happy path of our Strands POC when someone calls the /pitch API:
+DEMO = {
+    "C-1001": {
+        "profile": {"client_id":"C-1001","name":"Ada Moderate","risk":"moderate","horizon":"5y","goals":"retirement, college"},
+        "positions": {"SPY":60.0,"AGG":30.0,"VXUS":10.0}
+    }
+}
 
-Request comes in → The API route gets the request (say client_id=C-1001).
+@app.get("/client/profile")
+def profile(client_id: str = Query(...)):
+    return DEMO.get(client_id, {"client_id":client_id,"name":"","risk":"moderate","horizon":"5y","goals":""})
 
-Validation → FastAPI and our Pydantic schemas check if the request is valid and if the client exists in our demo data. If not, we immediately return an error.
-
-Setup → If valid, we load our config (model, tools, prompts) and build the agents.
-
-Orchestrator takes over → The Orchestrator agent coordinates the rest of the flow.
-
-Portfolio Monitor
-
-Reads client positions from CSV.
-
-Reads market snapshot from JSON.
-
-Computes diversification, volatility, and grade using tools.
-
-Calls the LLM briefly to generate a short, human-friendly summary.
-
-Recommender
-
-Applies simple rule-based recommendations.
-
-Tailors them to the client’s risk profile and horizon.
-
-Formats them into concise bullet points.
-
-Pitch Writer
-
-Uses the LLM again, but only for short synthesis, to turn findings + bullets into a client-facing pitch.
-
-Finally, runs a compliance check to strip risky language and add disclaimers.
-
-Response → The orchestrator bundles everything (client profile, portfolio findings, recommendations, final pitch) and sends it back as JSON.
-
-👉 The key point: tools do the heavy lifting; LLM only polishes and stitches. That keeps it modular, predictable, and cost-efficient.”
+@app.get("/client/positions")
+def positions(client_id: str = Query(...)):
+    return DEMO.get(client_id, {}).get("positions", {"SPY":60.0,"AGG":30.0,"VXUS":10.0})
 
 
+--------------------
+
+import os
+import pandas as pd
+from typing import Dict, Any
+from strands import tool
+from app.mcp.client import mcp_enabled, fetch
+
+DATA_PATH = os.getenv("DATA_PATH", "data/clients.csv")
+
+@tool
+def load_client_profile(client_id: str) -> Dict[str, Any]:
+    """
+    Try MCP portfolio:client_profile first; fallback to CSV.
+    """
+    if mcp_enabled():
+        try:
+            return fetch("portfolio", "client_profile", {"client_id": client_id})
+        except Exception:
+            pass  # fallback
+
+    if not os.path.exists(DATA_PATH):
+        raise FileNotFoundError(f"Missing data file: {DATA_PATH}")
+    df = pd.read_csv(DATA_PATH, dtype=str).fillna("")
+    row = df.loc[df["client_id"] == client_id]
+    if row.empty:
+        raise ValueError(f"Client {client_id} not found")
+    r = row.iloc[0]
+    return {
+        "client_id": r["client_id"],
+        "name": r.get("name", ""),
+        "risk": r.get("risk", "moderate"),
+        "horizon": r.get("horizon", "5y"),
+        "goals": r.get("goals", "")
+    }
+
+@tool
+def load_client_positions(client_id: str) -> Dict[str, float]:
+    """
+    Try MCP portfolio:positions first; fallback to CSV (pos_* columns).
+    """
+    if mcp_enabled():
+        try:
+            data = fetch("portfolio", "positions", {"client_id": client_id})
+            return {k: float(v) for k, v in data.items()}
+        except Exception:
+            pass  # fallback
+
+    if not os.path.exists(DATA_PATH):
+        raise FileNotFoundError(f"Missing data file: {DATA_PATH}")
+    df = pd.read_csv(DATA_PATH, dtype=str).fillna("")
+    row = df.loc[df["client_id"] == client_id]
+    if row.empty:
+        raise ValueError(f"Client {client_id} not found")
+    r = row.iloc[0].to_dict()
+    positions = {}
+    for k, v in r.items():
+        if k.startswith("pos_") and v:
+            try:
+                positions[k.replace("pos_", "")] = float(v)
+            except ValueError:
+                continue
+    if not positions:
+        positions = {"SPY": 60.0, "AGG": 30.0, "VXUS": 10.0}
+    return positions
 
 
------------------
+----------
 
 
-Sequence Flow (sequenceDiagram)
+import os, json
+from typing import Dict, Any
+from strands import tool
+from app.mcp.client import mcp_enabled, fetch
 
-“Now let’s look at the sequence of calls — how different parts talk to each other when generating a pitch:
+MARKET_PATH = os.getenv("MARKET_PATH", "data/market.json")
 
-Postman → FastAPI: We send a POST /pitch with a client ID.
+@tool
+def load_market_snapshot() -> Dict[str, Any]:
+    """
+    Try MCP market:snapshot first; fallback to local JSON.
+    """
+    if mcp_enabled():
+        try:
+            return fetch("market", "snapshot")
+        except Exception:
+            pass  # fallback
 
-FastAPI → Orchestrator: The request is handed over to our Orchestrator agent.
+    if not os.path.exists(MARKET_PATH):
+        return {
+            "volatility": {"SPY": 0.16, "AGG": 0.05, "VXUS": 0.18}
+        }
+    with open(MARKET_PATH, "r") as f:
+        return json.load(f)
 
-Orchestrator → PortfolioMonitor: Orchestrator first asks the Portfolio Monitor to run.
 
-Portfolio Monitor fetches client positions and market snapshot using tools.
 
-Tools compute weights, volatility, grade.
+---------
+How to run (POC with MCP)
 
-Portfolio Monitor calls the OpenAI model just for a short polish, producing a plain-English summary.
+Start both MCP demo servers (two terminals):
 
-Orchestrator → Recommender: Next, the Orchestrator passes the client profile + score to the Recommender.
+uvicorn app.mcp.servers.market_server:app --port 8765 --reload
+uvicorn app.mcp.servers.portfolio_server:app --port 8766 --reload
 
-Recommender uses tools to apply rules, tailor them, and format them into bullet points.
 
-Orchestrator → PitchWriter: Finally, the Orchestrator calls the Pitch Writer.
+Ensure app/mcp/client.yaml exists and has enabled: true.
 
-Pitch Writer uses OpenAI to generate a short client-facing pitch.
+Start your main API:
 
-Runs compliance tool to sanitize the language and add disclaimers.
-
-Return: Orchestrator collects client info, portfolio summary, recommendations, and pitch → returns JSON back to FastAPI, which sends a 200 OK response to Postman.
-
-👉 This shows the orchestration clearly:
-
-Tools first (deterministic, cheap).
-
-LLM second (small calls for summaries/pitches).
-
-Compliance last (safe output).
-
-That’s how Strands keeps the flow modular and budget-friendly.”
+uvicorn app.main:app --reload
