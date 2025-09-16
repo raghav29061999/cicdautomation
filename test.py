@@ -128,3 +128,59 @@ Ensure app/mcp/client.yaml exists and has enabled: true.
 Start your main API:
 
 uvicorn app.main:app --reload
+
+
+
+
+
+-------
+
+
+import os, json, time
+from typing import Any, Dict, Optional
+import yaml, requests
+
+_CFG_CACHE: Optional[Dict[str, Any]] = None
+
+def load_mcp_cfg(path: str = "app/mcp/client.yaml") -> Dict[str, Any]:
+    global _CFG_CACHE
+    if _CFG_CACHE is not None:
+        return _CFG_CACHE
+    if not os.path.exists(path):
+        _CFG_CACHE = {"enabled": False, "servers": {}}
+        return _CFG_CACHE
+    with open(path, "r") as f:
+        _CFG_CACHE = yaml.safe_load(f) or {}
+    return _CFG_CACHE
+
+def mcp_enabled() -> bool:
+    cfg = load_mcp_cfg()
+    # allow env override
+    env = os.getenv("MCP_ENABLED")
+    if env is not None:
+        return env.lower() in ("1", "true", "yes")
+    return bool(cfg.get("enabled", False))
+
+def fetch(server: str, resource: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    """
+    POC fetcher: calls simple HTTP JSON endpoints defined in client.yaml.
+    Later you can replace this with a proper MCP client (JSON-RPC / streams).
+    """
+    cfg = load_mcp_cfg()
+    servers = cfg.get("servers", {})
+    if server not in servers:
+        raise ValueError(f"MCP server '{server}' not configured")
+
+    base = servers[server]["base_url"].rstrip("/")
+    resources = servers[server].get("resources", {})
+    if resource not in resources:
+        raise ValueError(f"MCP resource '{server}:{resource}' not configured")
+
+    path = resources[resource]
+    url = f"{base}{path}"
+    timeout = float(cfg.get("timeout_seconds", 3))
+
+    resp = requests.get(url, params=params or {}, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
