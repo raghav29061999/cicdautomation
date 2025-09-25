@@ -1,31 +1,43 @@
-A Step-by-Step Walkthrough
-This diagram illustrates the primary workflow for our financial agent, from a client request to a final pitch. It demonstrates how Strands orchestrates a series of specialized agents and deterministic tools to achieve a complex outcome reliably and cost-efficiently.
+The Role of the Model Context Protocol (MCP)
+Standardized Data & Resource Layer
+The Model Context Protocol (MCP) acts as a standardized connector for all external data and tools. Instead of hardcoding data sources in your application, you fetch them via MCP servers.
 
-1. Client Request: The process begins with a POST request from a client-facing UI or Postman, containing a {client_id}.
+Key Benefits:
 
-2. API Validation: The FastAPI route receives the request, performs initial validation, and hands it off to the main Orchestrator Agent.
+Plug-and-Play Integration: Easily swap out data sources (e.g., from local files to production APIs) without changing the core agent logic.
 
-3. Orchestration & Delegation: The Orchestrator Agent directs the workflow, sequentially calling the specialized agents.
+Governance & Security: Enforces access control, auditing, and security scopes at the data layer.
 
-4. Portfolio Monitor: This agent loads the client's data, computes risk and score, and generates a brief summary using a small LLM call. This is an example of a deterministic tool-first approach.
-
-5. Recommender: The Recommender agent applies a set of business rules to the client's profile to generate and format tailored investment recommendations.
-
-6. Pitch Writer: The Pitch Writer synthesizes the outputs from the previous steps into a professional, client-facing pitch, ensuring it meets all compliance and legal requirements.
-
-7. Final Response: The API returns a JSON response containing the full client profile, portfolio summary, recommendations, and the finalized pitch.
-
-Key Principle: The flow prioritizes deterministic tools first, LLMs second, and compliance last, ensuring that the most predictable, reliable, and cost-efficient work is done before any creative or summarization tasks are handed off to the LLM.
+Enterprise Readiness: Makes the application modular, future-proof, and aligned with enterprise data governance standards.
 
 
+------
 
 
-----------
+This slide introduces the Model Context Protocol, or MCP—a standardized data and resource layer for our system. MCP gives us a consistent way to fetch information from sources like client profiles or market data.
+
+It delivers three big benefits. First, it makes the system plug-and-play—we can swap demo files for live production APIs without rewriting agent code. Second, it enforces governance and security by centralizing access controls and audit logs. And third, it ensures our POC is more than a demo—it’s a scalable, enterprise-ready blueprint.
 
 
+----
 
-Now let’s walk through the happy path for our financial agent—the ideal workflow when everything goes right. It starts with a simple API call from a client app or Postman, validated at the FastAPI endpoint before touching core logic. From there, the Orchestrator Agent takes control and sequences the flow.
+flowchart LR
+    subgraph Orchestrator["Orchestrator Agent"]
+      ORC[Request: client_id]
+    end
 
-First, the Portfolio Monitor pulls data with deterministic tools, performs calculations, and then uses a small LLM call to summarize results in natural language. Next, the Recommender applies business rules to generate tailored investment suggestions. Finally, the Pitch Writer composes a polished, client-ready document and runs final compliance checks.
+    subgraph MCP["MCP Layer"]
+      PFS[(Portfolio Server)]
+      MKS[(Market Server)]
+    end
 
-The output is returned as a single JSON response, ready for the front end to display. The key takeaway: this is a clear, predictable flow that uses the right tools for the right jobs—efficient, reliable, and cost-effective.
+    subgraph Fallback["Fallback Data"]
+      CSV[(clients.csv)]
+      JSON[(market.json)]
+    end
+
+    ORC -->|fetch profile| PFS
+    ORC -->|fetch snapshot| MKS
+
+    PFS -. if MCP disabled .-> CSV
+    MKS -. if MCP disabled .-> JSON
