@@ -1,1 +1,26 @@
-This blueprint shows how we’re preparing Strands for production on AWS. Security comes first—we’ll use Bedrock guardrails to enforce content safety policies and stop harmful inputs or outputs before they reach our system. For observability, CloudWatch will monitor performance in real time, while CloudTrail captures every API call for full auditability and compliance. On cost, we’ll apply strict tagging policies so spend is always visible and attributable to the right teams. Together, these measures ensure that Strands is not just functional, but secure, observable, and cost-efficient—laying the foundation for what could evolve into a fully managed AWS Strands service in the future.
+Intro to Financial Agent (POC)
+A Modular, Multi-Agent System on Strands
+Business Context: A personalized investment pitch generator for clients.
+
+Key Components:
+
+Portfolio Monitor: Assesses client's current holdings (diversification, volatility, asset grade).
+
+Recommender: Generates tailored portfolio recommendations based on risk tolerance and goals.
+
+Pitch Writer: Creates a comprehensive, client-facing pitch with automated compliance checks.
+
+Highlights:
+
+Tools-first approach: Emphasizes deterministic, cost-efficient actions (data retrieval, calculations).
+
+LLMs as polishers: The LLM's role is streamlined to summarize and refine outputs, keeping token usage low and costs predictable.
+
+Enterprise-ready: The modular design ensures the system is scalable and adaptable to other use cases beyond this POC.
+
+
+-----------
+
+Now let’s bring this to life with a practical example—a Financial Agent POC designed to generate personalized investment pitches for clients. Instead of one massive agent, we’ve built a modular, multi-agent system orchestrated by Strands. The Portfolio Monitor analyzes a client’s holdings, the Recommender generates tailored suggestions, and the Pitch Writer drafts a polished, compliance-ready pitch.
+
+This design has two big advantages. First, it’s a tools-first approach: heavy data retrieval and calculations are handled by deterministic tools, while the LLM is used only to refine and summarize. That keeps token usage low and costs predictable. Second, it’s enterprise-ready: each agent is reusable, the architecture is modular and scalable, and the framework is vendor-agnostic. Together, this demonstrates how Strands can solve real, high-value business problems.
