@@ -1,44 +1,4 @@
-flowchart LR
-  %% Trust Boundary: Source Zone
-  subgraph SZ["Source Zone"]
-    D[Enterprise Data Stores]
-    A[External/Partner APIs]
-    T[Internal Tools & Services]
-  end
-
-  %% Trust Boundary: Orchestration Zone
-  subgraph OZ["Orchestration Zone (Strands)"]
-    O[Strands Orchestrator]
-    G[Composable Graphs]
-    X[Agent & Tool Adapters]
-  end
-
-  %% Trust Boundary: Governance/Safety Zone
-  subgraph GZ["Governance & Safety Zone"]
-    I[IAM / Identity]
-    R[Guardrails / Policy Checks]
-    V[Observability / Telemetry]
-  end
-
-  %% Trust Boundary: Delivery/Consumer Zone
-  subgraph DZ["Delivery / Consumer Zone"]
-    U[Apps & APIs]
-    W[Automated Workflows]
-    BI[Dashboards & Insights]
-  end
-
-  %% Flows
-  D --> O
-  A --> O
-  T --> O
-
-  O --> G
-  O --> X
-
-  O --> I
-  O --> R
-  O --> V
-
-  O --> U
-  O --> W
-  O --> BI
+Slide 6
+This slide shows how Strands acts as the integration layer for our agentic solution. It’s not a standalone component, but a fabric that enhances existing protocols and tools. With MCP, a strand can serve as a unique context, preserving state across long-running sessions. With A2A, Strands structures inter-agent communication, making workflows both traceable and orchestrated. For MemGPT, Strands organizes memory into an indexable knowledge base, enabling richer personalization. And with multimodal agents, Strands unifies different inputs—like text and images—into a single context for cross-modal reasoning. In short, Strands brings structure, interoperability, and scalability to complex agent architectures
+Slide 7
+Our approach is about enabling safe operations by design through a defense-in-depth model. Strands isn’t just a single checkpoint, it’s a layered framework. At the perimeter, we enforce identity and access controls so only authorized users can interact with agents. At the platform level, Strands provides guardrails and policy enforcement, ensuring agents operate within defined rules and preventing issues before they occur. At the data layer, we protect sensitive information with redaction, tokenization, and content safety filters. And beyond prevention, every agent action is logged, giving us full traceability and auditability. In short, we’re building a system that is resilient, secure, and fully accountable.
