@@ -1,26 +1,42 @@
-Intro to Financial Agent (POC)
-A Modular, Multi-Agent System on Strands
-Business Context: A personalized investment pitch generator for clients.
+Directory Structure (POC App)
 
-Key Components:
+app/ (core application)
 
-Portfolio Monitor: Assesses client's current holdings (diversification, volatility, asset grade).
+api/ → FastAPI routes + schemas
 
-Recommender: Generates tailored portfolio recommendations based on risk tolerance and goals.
+agent/ → orchestrator + specialists + factory
 
-Pitch Writer: Creates a comprehensive, client-facing pitch with automated compliance checks.
+tools/ → deterministic tools (I/O, portfolio, recommend, compliance)
 
-Highlights:
+prompts/ → all prompts as modular .py files
 
-Tools-first approach: Emphasizes deterministic, cost-efficient actions (data retrieval, calculations).
+mcp/ → optional MCP client + demo servers
 
-LLMs as polishers: The LLM's role is streamlined to summarize and refine outputs, keeping token usage low and costs predictable.
+configs/ → central YAML config (model, tools, budgets)
 
-Enterprise-ready: The modular design ensures the system is scalable and adaptable to other use cases beyond this POC.
+data/ → demo datasets (clients.csv, market.json)
+
+main.py → entrypoint (creates app, loads agents)
 
 
------------
+------
 
-Now let’s bring this to life with a practical example—a Financial Agent POC designed to generate personalized investment pitches for clients. Instead of one massive agent, we’ve built a modular, multi-agent system orchestrated by Strands. The Portfolio Monitor analyzes a client’s holdings, the Recommender generates tailored suggestions, and the Pitch Writer drafts a polished, compliance-ready pitch.
+Our POC app is organized into a simple, modular directory structure:
 
-This design has two big advantages. First, it’s a tools-first approach: heavy data retrieval and calculations are handled by deterministic tools, while the LLM is used only to refine and summarize. That keeps token usage low and costs predictable. Second, it’s enterprise-ready: each agent is reusable, the architecture is modular and scalable, and the framework is vendor-agnostic. Together, this demonstrates how Strands can solve real, high-value business problems.
+app/ – the core application
+
+api/ – FastAPI routes and schemas
+
+agent/ – the orchestrator, specialist agents, and factory
+
+tools/ – deterministic tools for portfolio analysis, recommendations, compliance, and I/O
+
+prompts/ – modular Python files for all prompts
+
+mcp/ – optional MCP client and demo servers
+
+configs/ – central YAML config for models, tools, and budgets
+
+data/ – demo datasets like clients.csv and market.json
+
+main.py – entrypoint that initializes the app and loads agents
