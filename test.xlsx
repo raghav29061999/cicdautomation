@@ -1,43 +1,64 @@
-The Role of the Model Context Protocol (MCP)
-Standardized Data & Resource Layer
-The Model Context Protocol (MCP) acts as a standardized connector for all external data and tools. Instead of hardcoding data sources in your application, you fetch them via MCP servers.
+import json
+import requests
+from bs4 import BeautifulSoup, Tag
 
-Key Benefits:
+def scrape_dataiku_doc(url: str, outfile: str = None, timeout: int = 20) -> dict:
+    """
+    Scrape Dataiku documentation page content into nested JSON structure.
+    Ignores left nav panel, extracts only main content (headings + body text).
+    """
+    resp = requests.get(url, timeout=timeout, headers={
+        "User-Agent": "Mozilla/5.0 (compatible; DataikuScraper/1.0)"
+    })
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
 
-Plug-and-Play Integration: Easily swap out data sources (e.g., from local files to production APIs) without changing the core agent logic.
+    # ---- Focus only on main content container ----
+    # On Dataiku docs, it's usually <div role="main"> or class="wy-nav-content"
+    main = soup.find("div", {"role": "main"}) or soup.find("div", class_="wy-nav-content")
+    if not main:
+        main = soup.body  # fallback
 
-Governance & Security: Enforces access control, auditing, and security scopes at the data layer.
+    # Collect all headings and paragraphs under main
+    results = {}
+    current_h1, current_h2, current_h3 = None, None, None
 
-Enterprise Readiness: Makes the application modular, future-proof, and aligned with enterprise data governance standards.
+    for tag in main.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol"], recursive=True):
+        if isinstance(tag, Tag):
+            text = tag.get_text(" ", strip=True)
+
+            # Handle headings
+            if tag.name == "h1":
+                current_h1 = text
+                results[current_h1] = {}
+                current_h2 = current_h3 = None
+            elif tag.name == "h2" and current_h1:
+                current_h2 = text
+                results[current_h1][current_h2] = {}
+                current_h3 = None
+            elif tag.name == "h3" and current_h1 and current_h2:
+                current_h3 = text
+                results[current_h1][current_h2][current_h3] = ""
+            # Handle paragraph/list text
+            elif tag.name in {"p", "ul", "ol"}:
+                clean_txt = tag.get_text("\n", strip=True)
+                if current_h3:
+                    # lowest level -> append text
+                    results[current_h1][current_h2][current_h3] += "\n" + clean_txt
+                elif current_h2:
+                    results[current_h1][current_h2][text] = clean_txt
+                elif current_h1:
+                    results[current_h1][text] = clean_txt
+
+    # Save to file if requested
+    if outfile:
+        with open(outfile, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=2, ensure_ascii=False)
+
+    return results
 
 
-------
-
-
-This slide introduces the Model Context Protocol, or MCP—a standardized data and resource layer for our system. MCP gives us a consistent way to fetch information from sources like client profiles or market data.
-
-It delivers three big benefits. First, it makes the system plug-and-play—we can swap demo files for live production APIs without rewriting agent code. Second, it enforces governance and security by centralizing access controls and audit logs. And third, it ensures our POC is more than a demo—it’s a scalable, enterprise-ready blueprint.
-
-
-----
-
-flowchart LR
-    subgraph Orchestrator["Orchestrator Agent"]
-      ORC[Request: client_id]
-    end
-
-    subgraph MCP["MCP Layer"]
-      PFS[(Portfolio Server)]
-      MKS[(Market Server)]
-    end
-
-    subgraph Fallback["Fallback Data"]
-      CSV[(clients.csv)]
-      JSON[(market.json)]
-    end
-
-    ORC -->|fetch profile| PFS
-    ORC -->|fetch snapshot| MKS
-
-    PFS -. if MCP disabled .-> CSV
-    MKS -. if MCP disabled .-> JSON
+if __name__ == "__main__":
+    url = "https://doc.dataiku.com/dss/latest/explore/"  # example
+    data = scrape_dataiku_doc(url, "dataiku_scraped.json")
+    print(json.dumps(data, indent=2, ensure_ascii=False))
