@@ -1,53 +1,97 @@
-slide 7
-Strands into context alongside other frameworks. We’ve reviewed leading open-source and proprietary options, each of which brings its own strengths. But what makes Strands unique is that it’s not trying to replace these tools—it complements them. By acting as an integration fabric, Strands provides the structure, interoperability, and traceability that others leave as implementation challenges. This means adopting Strands doesn’t lock us into a single vendor or architecture; instead, it lets us bring the best of multiple frameworks together while maintaining security, governance, and scalability. In short, Strands lowers integration friction, future-proofs our architecture, and accelerates adoption across the enterprise
+This slide demonstrates that Strands is enterprise-ready and designed to fit seamlessly into our existing AWS environment. For compute, the agentic core can run on Lambda, ECS, or EKS depending on workload needs. For state and memory, we use DynamoDB for durability and ElastiCache for speed. Identity is handled with IAM, and sensitive data is secured with KMS. At the inference layer, Amazon Bedrock gives us managed access to leading language models, keeping the stack simple and secure. For search and indexing, OpenSearch supports RAG workflows.
+
+The key takeaway is that Strands isn’t a black box—it maps directly to well-known AWS services, aligns with our security standards, and remains portable across clouds, ensuring flexibility and future-proofing.
 
 
------
+
+Strands Component
+
+AWS Service
+
+Rationale
+
+Agentic Core / Compute
+
+AWS Lambda / ECS / EKS
+
+Provides flexible, scalable, and resilient compute for different agent workloads.
+
+Data & Tooling Storage
+
+Amazon S3
+
+Highly durable, scalable, and cost-effective object storage for logs, data, and artifacts.
+
+State & Memory (MCP)
+
+Amazon DynamoDB / ElastiCache
+
+DynamoDB for persistent, low-latency state. ElastiCache for high-speed, transient caching.
+
+Identity & Access
+
+IAM & KMS
+
+Manages fine-grained access to resources and secures sensitive data with cryptographic keys.
+
+Inference Layer
+
+Amazon Bedrock
+
+Provides a managed service for accessing a wide range of foundation models, abstracting complexity.
+
+Search & Indexing
+
+Amazon OpenSearch
+
+A scalable service for building and managing indexes for semantic search and retrieval.
+
+Networking
+
+VPC & Private Endpoints
+
+Creates a secure and isolated network environment for all services and data.
 
 
-A Closer Look at Key Tradeoffs
-Evaluation Dimension
 
-Strands
+High-Level Reference Architecture
+graph TD
+    subgraph "External Systems"
+        A[User Interface / APIs]
+        B[External Data Sources]
+    end
 
-LangChain
+    subgraph "Strands on AWS"
+        subgraph "Network"
+            VPC[AWS VPC]
+            NLB[Network Load Balancer]
+        end
 
-Composition Model
+        subgraph "Application Layer"
+            Compute(Lambda / ECS / EKS)
+            Bedrock{{Bedrock / LLMs}}
+        end
 
-Declarative & Graph-Based: Agentic core and tools are defined as a graph. The system figures out the execution path. Supports cycles and complex state.
+        subgraph "Data & State Layer"
+            Storage[S3]
+            DynamoDB[DynamoDB / ElastiCache]
+            OpenSearch[OpenSearch]
+        end
 
-Procedural & Chain-Based: Components are explicitly linked in a fixed sequence. Requires manual orchestration of branches and loops.
+        A -- HTTPS --> VPC
+        NLB -- Routes to --> Compute
+        Compute -- "Retrieval" --> OpenSearch
+        Compute -- "Inference" --> Bedrock
+        Compute -- "State/Context" --> DynamoDB
+        Compute -- "Logging/Storage" --> Storage
+        B -- "Ingest" --> Storage
+    end
 
-Tool Adapters
+    subgraph "Governance & Security"
+        IAM(IAM)
+        KMS(KMS)
+        IAM & KMS -- Controls Access --> Strands
+    end
 
-Semantic Adapters: Tools are defined with rich metadata and intent, allowing the model to choose and use the right tool dynamically.
-
-Explicit Wrappers: Tools require a code-based wrapper to expose functionality. Tool selection is often explicit within the chain.
-
-State & Memory
-
-First-Class Context: Context (or memory) is a core component of the graph, ensuring state is managed and passed automatically between nodes.
-
-Integrated Components: Requires explicit integration of memory components like ConversationBufferMemory into the chain. Not inherent.
-
-Observability & Eval
-
-Native Hooks: Offers built-in, first-class hooks for tracing, logging, and policy enforcement at the graph node level.
-
-External Integration: Requires external integration with platforms like LangSmith for advanced tracing and evaluation.
-
-Ecosystem Maturity
-
-Emerging: A newer framework with a focused, powerful feature set. Actively developed with an emphasis on production readiness.
-
-Mature & Robust: A large, diverse community with extensive documentation and a wide range of integrations.
-
-
------
-
-
-This slide highlights our deep dive on Strands versus LangChain. LangChain is procedural and code-heavy—good for simple workflows but harder to scale. Strands is declarative and graph-based, letting the agentic core determine the best execution path for complex tasks.
-
-For tools, LangChain relies on manual wrappers, while Strands uses semantic adapters, making the system more flexible and intelligent. On memory, LangChain requires explicit components, but in Strands, context is built into the graph, so state flows naturally. And for operations, LangChain depends on external tools, whereas Strands has observability, logging, and policy enforcement natively integrated.
-
-Overall, LangChain is strong for quick prototyping, but Strands is better suited for enterprise-grade, scalable systems.
+    style VPC fill:#87CEEB,stroke:#333
+    style Bedrock fill:#FFD700,stroke:#333
