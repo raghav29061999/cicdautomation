@@ -62,3 +62,20 @@ if __name__ == "__main__":
     url = "https://doc.dataiku.com/dss/latest/explore/"  # example
     data = scrape_dataiku_doc(url, "dataiku_scraped.json")
     print(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+
+
+
+--
+
+
+failing due to a NumberFormatException, which occurs because a field expected to be a standard long integer is receiving a number with 20 digits, exceeding its maximum capacity.
+
+This is likely caused by an unexpected, large value in the source data at line 113311, column 41.
+
+Here are two possible ways to resolve this:
+
+Immediate Resolution (Data Fix): We can manually identify and correct the specific invalid data entry (leaf_id at the specified location) to unblock the current job run.
+
+Long-Term Resolution (Code Change): We can update the schema or code to use a data type that can handle a larger range of numbers, such as a BigInteger or equivalent. This will prevent similar errors from occurring in the future with new data.
