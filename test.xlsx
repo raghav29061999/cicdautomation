@@ -1,4 +1,53 @@
-Slide 6
-This slide shows how Strands acts as the integration layer for our agentic solution. It’s not a standalone component, but a fabric that enhances existing protocols and tools. With MCP, a strand can serve as a unique context, preserving state across long-running sessions. With A2A, Strands structures inter-agent communication, making workflows both traceable and orchestrated. For MemGPT, Strands organizes memory into an indexable knowledge base, enabling richer personalization. And with multimodal agents, Strands unifies different inputs—like text and images—into a single context for cross-modal reasoning. In short, Strands brings structure, interoperability, and scalability to complex agent architectures
-Slide 7
-Our approach is about enabling safe operations by design through a defense-in-depth model. Strands isn’t just a single checkpoint, it’s a layered framework. At the perimeter, we enforce identity and access controls so only authorized users can interact with agents. At the platform level, Strands provides guardrails and policy enforcement, ensuring agents operate within defined rules and preventing issues before they occur. At the data layer, we protect sensitive information with redaction, tokenization, and content safety filters. And beyond prevention, every agent action is logged, giving us full traceability and auditability. In short, we’re building a system that is resilient, secure, and fully accountable.
+slide 7
+Strands into context alongside other frameworks. We’ve reviewed leading open-source and proprietary options, each of which brings its own strengths. But what makes Strands unique is that it’s not trying to replace these tools—it complements them. By acting as an integration fabric, Strands provides the structure, interoperability, and traceability that others leave as implementation challenges. This means adopting Strands doesn’t lock us into a single vendor or architecture; instead, it lets us bring the best of multiple frameworks together while maintaining security, governance, and scalability. In short, Strands lowers integration friction, future-proofs our architecture, and accelerates adoption across the enterprise
+
+
+-----
+
+
+A Closer Look at Key Tradeoffs
+Evaluation Dimension
+
+Strands
+
+LangChain
+
+Composition Model
+
+Declarative & Graph-Based: Agentic core and tools are defined as a graph. The system figures out the execution path. Supports cycles and complex state.
+
+Procedural & Chain-Based: Components are explicitly linked in a fixed sequence. Requires manual orchestration of branches and loops.
+
+Tool Adapters
+
+Semantic Adapters: Tools are defined with rich metadata and intent, allowing the model to choose and use the right tool dynamically.
+
+Explicit Wrappers: Tools require a code-based wrapper to expose functionality. Tool selection is often explicit within the chain.
+
+State & Memory
+
+First-Class Context: Context (or memory) is a core component of the graph, ensuring state is managed and passed automatically between nodes.
+
+Integrated Components: Requires explicit integration of memory components like ConversationBufferMemory into the chain. Not inherent.
+
+Observability & Eval
+
+Native Hooks: Offers built-in, first-class hooks for tracing, logging, and policy enforcement at the graph node level.
+
+External Integration: Requires external integration with platforms like LangSmith for advanced tracing and evaluation.
+
+Ecosystem Maturity
+
+Emerging: A newer framework with a focused, powerful feature set. Actively developed with an emphasis on production readiness.
+
+Mature & Robust: A large, diverse community with extensive documentation and a wide range of integrations.
+
+
+-----
+
+
+This slide highlights our deep dive on Strands versus LangChain. LangChain is procedural and code-heavy—good for simple workflows but harder to scale. Strands is declarative and graph-based, letting the agentic core determine the best execution path for complex tasks.
+
+For tools, LangChain relies on manual wrappers, while Strands uses semantic adapters, making the system more flexible and intelligent. On memory, LangChain requires explicit components, but in Strands, context is built into the graph, so state flows naturally. And for operations, LangChain depends on external tools, whereas Strands has observability, logging, and policy enforcement natively integrated.
+
+Overall, LangChain is strong for quick prototyping, but Strands is better suited for enterprise-grade, scalable systems.
