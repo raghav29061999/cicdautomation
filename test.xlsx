@@ -1,81 +1,244 @@
 import json
-import requests
-from bs4 import BeautifulSoup, Tag
+import re
+from collections import defaultdict
+from urllib.parse import urljoin
 
-def scrape_dataiku_doc(url: str, outfile: str = None, timeout: int = 20) -> dict:
+import requests
+from bs4 import BeautifulSoup, NavigableString, Tag
+
+
+def scrape_dataiku_like_docs(url: str, timeout: int = 20) -> dict:
     """
-    Scrape Dataiku documentation page content into nested JSON structure.
-    Ignores left nav panel, extracts only main content (headings + body text).
+    Scrape a Dataiku-docs-style page into a nested JSON structure,
+    ignoring side panels and preserving links in a separate list.
+
+    Output shape (example):
+    {
+      "url": "...",
+      "title": "...",
+      "sections": {
+        "Exploring data": {
+          "children": {
+            "Sampling": {
+              "children": {
+                "First records": {
+                  "content": "This sampling method simply takes the first N rows ...",
+                  "links": [
+                    {"text": "Schemas, storage types and meanings", "url": "https://..."}
+                  ]
+                },
+                "Random sampling (fixed number of records)": {
+                  "content": "This method randomly selects N records ...",
+                  "links": []
+                }
+              }
+            }
+          }
+        }
+      }
+    }
     """
+    # ---------------- Fetch ----------------
     resp = requests.get(url, timeout=timeout, headers={
-        "User-Agent": "Mozilla/5.0 (compatible; DataikuScraper/1.0)"
+        "User-Agent": "Mozilla/5.0 (compatible; DocScraper/1.0)"
     })
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    # ---- Focus only on main content container ----
-    # On Dataiku docs, it's usually <div role="main"> or class="wy-nav-content"
-    main = soup.find("div", {"role": "main"}) or soup.find("div", class_="wy-nav-content")
-    if not main:
-        main = soup.body  # fallback
+    # ---------------- Utilities ----------------
+    def _clean_ws(s: str) -> str:
+        return re.sub(r"\s+", " ", s).strip()
 
-    # Collect all headings and paragraphs under main
-    results = {}
-    current_h1, current_h2, current_h3 = None, None, None
+    def _is_heading(tag: Tag) -> bool:
+        return tag.name in {"h1", "h2", "h3", "h4", "h5", "h6"}
 
-    for tag in main.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol"], recursive=True):
-        if isinstance(tag, Tag):
-            text = tag.get_text(" ", strip=True)
+    def _level(tag: Tag) -> int:
+        return int(tag.name[1])
 
-            # Handle headings
-            if tag.name == "h1":
-                current_h1 = text
-                results[current_h1] = {}
-                current_h2 = current_h3 = None
-            elif tag.name == "h2" and current_h1:
-                current_h2 = text
-                results[current_h1][current_h2] = {}
-                current_h3 = None
-            elif tag.name == "h3" and current_h1 and current_h2:
-                current_h3 = text
-                results[current_h1][current_h2][current_h3] = ""
-            # Handle paragraph/list text
-            elif tag.name in {"p", "ul", "ol"}:
-                clean_txt = tag.get_text("\n", strip=True)
-                if current_h3:
-                    # lowest level -> append text
-                    results[current_h1][current_h2][current_h3] += "\n" + clean_txt
-                elif current_h2:
-                    results[current_h1][current_h2][text] = clean_txt
-                elif current_h1:
-                    results[current_h1][text] = clean_txt
+    def _new_node() -> dict:
+        # Each node can hold text + links + children
+        return {"content": "", "links": [], "children": {}, "_dupe_counter": defaultdict(int)}
 
-    # Save to file if requested
-    if outfile:
-        with open(outfile, "w", encoding="utf-8") as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
+    def _append_text(node: dict, text: str) -> None:
+        if not text:
+            return
+        if node["content"]:
+            node["content"] += "\n\n" + text
+        else:
+            node["content"] = text
 
-    return results
+    def _dedup_key(parent: dict, title: str) -> str:
+        title = title or "Untitled"
+        if title in parent["children"]:
+            parent["_dupe_counter"][title] += 1
+            return f"{title} ({parent['_dupe_counter'][title] + 1})"
+        parent["_dupe_counter"][title] = 0
+        return title
+
+    def _add_child(parent: dict, title: str) -> tuple[str, dict]:
+        key = _dedup_key(parent, title)
+        parent["children"][key] = _new_node()
+        return key, parent["children"][key]
+
+    def _strip_noise(container: Tag) -> None:
+        """
+        Remove left nav, sidebars, tocs, breadcrumbs, footer, admonitions, etc.
+        Covers common Sphinx/ReadTheDocs classes used by Dataiku docs.
+        """
+        noise_selectors = [
+            "nav", "header", "footer",
+            ".wy-nav-side", ".wy-side-nav-search",
+            ".sphinxsidebar", ".related", ".breadcrumbs",
+            ".toctree-wrapper", ".toc", ".localtoc",
+            ".admonition", ".sidebar", ".seealso", ".note", ".warning", ".tip",
+            ".rst-footer-buttons", ".wy-breadcrumbs", ".wy-nav-top",
+        ]
+        for sel in noise_selectors:
+            for el in container.select(sel):
+                el.decompose()
+
+    def _main_content_root(soup: BeautifulSoup) -> Tag:
+        """
+        Try to pinpoint the main article body.
+        """
+        # Dataiku docs often follow readthedocs theme
+        candidates = [
+            'div[role="main"] .wy-nav-content',      # nested
+            'div[role="main"]',                      # generic
+            '.wy-nav-content .rst-content',          # RTD content
+            '.wy-nav-content',                       # fallback
+            'article',                               # very generic
+        ]
+        for sel in candidates:
+            el = soup.select_one(sel)
+            if el:
+                return el
+        return soup.body or soup
+
+    def _text_and_links(el: Tag) -> tuple[str, list]:
+        """
+        Extract plain text while collecting links separately (absolute URLs).
+        We do NOT emit markdown; links are removed from text and stored in 'links'.
+        """
+        links = []
+
+        # Clone shallowly by operating on a copy of HTML string with new soup,
+        # so we can replace <a> with its text without mutating original soup.
+        tmp = BeautifulSoup(str(el), "html.parser")
+
+        for a in tmp.find_all("a"):
+            label = _clean_ws(a.get_text(" ", strip=True))
+            href = a.get("href")
+            if href:
+                links.append({"text": label, "url": urljoin(url, href)})
+            # Replace link with just its text in the visible content
+            a.replace_with(label)
+
+        # Handle lists: flatten only first-level items; ignore nested lists inside <li>
+        if tmp.name in {"ul", "ol"}:
+            lines = []
+            for li in tmp.find_all("li", recursive=False):
+                # remove nested sub-lists to avoid deep nesting noise
+                for sub in li.find_all(["ul", "ol"]):
+                    sub.decompose()
+                li_txt = _clean_ws(li.get_text(" ", strip=True))
+                if li_txt:
+                    lines.append(f"- {li_txt}")
+            return ("\n".join(lines), links)
+
+        # Code blocks (keep verbatim)
+        if tmp.name in {"pre", "code"}:
+            txt = tmp.get_text("\n", strip=True)
+            return (txt, links)
+
+        # Tables -> simple TSV-like lines
+        if tmp.name == "table":
+            rows = []
+            for tr in tmp.find_all("tr", recursive=False):
+                cells = tr.find_all(["th", "td"], recursive=False)
+                if not cells:
+                    continue
+                row = "\t".join(_clean_ws(c.get_text(" ", strip=True)) for c in cells)
+                rows.append(row)
+            return ("\n".join(rows), links)
+
+        # Default: flattened text
+        txt = _clean_ws(tmp.get_text(" ", strip=True))
+        return (txt, links)
+
+    # ---------------- Focus main content only ----------------
+    main = _main_content_root(soup)
+    _strip_noise(main)
+
+    # ---------------- Build hierarchy ----------------
+    root = _new_node()       # synthetic root (level 0)
+    stack = [(0, "_root", root)]
+
+    # iterate linear DOM order within main, but skip scripts/styles
+    for tag in main.descendants:
+        if isinstance(tag, NavigableString):
+            continue
+        if not isinstance(tag, Tag):
+            continue
+        if tag.name in {"script", "style", "noscript"}:
+            continue
+
+        if _is_heading(tag):
+            lvl = _level(tag)
+            title = _clean_ws(tag.get_text(" ", strip=True)) or "Untitled"
+
+            # unwind to parent with lower level
+            while stack and stack[-1][0] >= lvl:
+                stack.pop()
+            if not stack:
+                stack = [(0, "_root", root)]
+
+            parent_node = stack[-1][2]
+            key, child = _add_child(parent_node, title)
+            stack.append((lvl, key, child))
+            continue
+
+        # content-bearing tags we want to keep
+        content_tags = {"p", "ul", "ol", "pre", "code", "blockquote", "table", "figure", "figcaption"}
+        if tag.name in content_tags:
+            # avoid double-processing nested content; only take "top" content blocks
+            par = tag.parent
+            if isinstance(par, Tag) and par.name in content_tags and not _is_heading(par):
+                continue
+
+            # current node is top of stack; if only root present, create a preamble
+            lvl, key, node = stack[-1]
+            if key == "_root":
+                # ensure a preamble child under root
+                if "_preamble" not in node["children"]:
+                    node["children"]["_preamble"] = _new_node()
+                node = node["children"]["_preamble"]
+
+            txt, lnks = _text_and_links(tag)
+            if txt:
+                _append_text(node, txt)
+            if lnks:
+                node["links"].extend(lnks)
+
+    # ---------------- Strip helper fields & return ----------------
+    def strip_helpers(n: dict) -> dict:
+        return {
+            "content": n["content"],
+            "links": n["links"],
+            "children": {k: strip_helpers(v) for k, v in n["children"].items()}
+        }
+
+    sections = {k: strip_helpers(v) for k, v in root["children"].items()}
+
+    return {
+        "url": url,
+        "title": _clean_ws(soup.title.get_text()) if soup.title else "",
+        "sections": sections
+    }
 
 
+# ------------------ Demo / CLI ------------------
 if __name__ == "__main__":
-    url = "https://doc.dataiku.com/dss/latest/explore/"  # example
-    data = scrape_dataiku_doc(url, "dataiku_scraped.json")
+    test_url = "https://doc.dataiku.com/dss/latest/explore/"
+    data = scrape_dataiku_like_docs(test_url)
     print(json.dumps(data, indent=2, ensure_ascii=False))
-
-
-
-
-
---
-
-
-failing due to a NumberFormatException, which occurs because a field expected to be a standard long integer is receiving a number with 20 digits, exceeding its maximum capacity.
-
-This is likely caused by an unexpected, large value in the source data at line 113311, column 41.
-
-Here are two possible ways to resolve this:
-
-Immediate Resolution (Data Fix): We can manually identify and correct the specific invalid data entry (leaf_id at the specified location) to unblock the current job run.
-
-Long-Term Resolution (Code Change): We can update the schema or code to use a data type that can handle a larger range of numbers, such as a BigInteger or equivalent. This will prevent similar errors from occurring in the future with new data.
