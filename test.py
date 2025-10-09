@@ -1,62 +1,75 @@
-import pandas as pd
-import ast
 import json
+import ast
+import pandas as pd
 
-# Example scraper (replace with your actual one)
-def scraped_heading_to_json(url):
-    # Simulate your scraping logic
-    return {"title": f"Scraped heading for {url}"}
+# your existing dataframe: url_df
+# your existing function: scrape_to_json(url) -> JSON-like (dict/list) or string
 
-# Example url_df
-url_df = pd.DataFrame({
-    "List_URLS": [
-        "{'What will happen in future': ['https://a1.com','https://a2.com','https://a3.com','https://a4.com','https://a5.com']}",
-        "{'Another query': ['https://b1.com','https://b2.com','https://b3.com','https://b4.com','https://b5.com']}"
-    ]
-})
-
-# Initialize 5 empty lists
+# Output lists
 url1, url2, url3, url4, url5 = [], [], [], [], []
+extracted_keys = []  # optional: if you want to keep the key per row
 
-# Iterate through each row of url_df
-for _, row in url_df.iterrows():
-    # Safely parse the stringified dict
+def _parse_dict_like(cell):
+    """Parse a dict stored as a string (JSON or Python-literal style)."""
+    if pd.isna(cell):
+        return {}
+    if isinstance(cell, dict):
+        return cell
+    s = str(cell).strip()
+    # Try JSON first, then Python literal (e.g., single quotes)
     try:
-        data = ast.literal_eval(row["List_URLS"])
+        return json.loads(s)
     except Exception:
-        data = {}
+        try:
+            return ast.literal_eval(s)
+        except Exception:
+            return {}
 
-    # Extract the first (and only) value list (list of URLs)
-    urls = list(data.values())[0] if data else []
+def _safe_to_str(x):
+    """Convert scrape_to_json output to a string reliably."""
+    if isinstance(x, str):
+        return x
+    try:
+        return json.dumps(x, ensure_ascii=False)
+    except Exception:
+        return str(x)
 
-    # Ensure exactly 5 items (pad with None)
-    urls = (urls + [None] * 5)[:5]
+# Process each row
+for _, row in url_df.iterrows():
+    d = _parse_dict_like(row["List_URLS"])
+    if not d:
+        extracted_keys.append(None)
+        lists = [url1, url2, url3, url4, url5]
+        for L in lists:
+            L.append(None)
+        continue
 
-    # Scrape each and convert to string
-    scraped = []
-    for u in urls:
-        if u:
-            try:
-                res = scraped_heading_to_json(u)
-                scraped.append(json.dumps(res, ensure_ascii=False))
-            except Exception as e:
-                scraped.append(f"ERROR: {e}")
-        else:
-            scraped.append(None)
+    # Take the first (and presumably only) key
+    key = next(iter(d))
+    extracted_keys.append(key)
 
-    # Append each result to corresponding list
-    url1.append(scraped[0])
-    url2.append(scraped[1])
-    url3.append(scraped[2])
-    url4.append(scraped[3])
-    url5.append(scraped[4])
+    urls = d.get(key, [])
+    # Normalize to length 5
+    urls = list(urls)[:5] + [None] * (5 - len(urls))
 
-# ✅ Now you have 5 lists:
-# url1, url2, url3, url4, url5
+    # Call your scraper for each url index
+    out_lists = [url1, url2, url3, url4, url5]
+    for i, L in enumerate(out_lists):
+        u = urls[i]
+        if not u:
+            L.append(None)
+            continue
+        try:
+            res = scrape_to_json(u)     # <-- your function
+            L.append(_safe_to_str(res)) # ensure string
+        except Exception:
+            L.append(None)
 
-print("url1:", url1)
-print("url2:", url2)
-print("url3:", url3)
-print("url4:", url4)
-print("url5:", url5)
-
+# (Optional) attach back to the dataframe
+url_df = url_df.copy()
+url_df["List_Key"] = extracted_keys
+url_df["url1"] = url1
+url_df["url2"] = url2
+url_df["url3"] = url3
+url_df["url4"] = url4
+url_df["url5"] = url5
