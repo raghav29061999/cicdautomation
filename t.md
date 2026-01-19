@@ -1,126 +1,278 @@
-# Framework Evaluation Matrix (Story-Agnostic)
+# src/contracts/validation_spec.py
+"""
+Validation Specification (CONTRACT-v1.0)
 
-## Evidence Basis (Sanitized)
-- Evidence reviewed: Phase-1 artifacts (CIR, ambiguity logs, coverage intent, run manifest, contract deltas)
-- Note: Requirements below are intentionally generalized to avoid revealing story content.
+This module defines GOVERNANCE rules that are STATIC and shared across all user stories.
+It is intentionally separate from CIR schema/models:
+- cir_schema.py defines the structure ("language")
+- validation_spec.py defines what is considered valid, complete, and acceptable ("policy")
 
-## Derived System Requirements (Generalized)
+Key principles:
+- Deterministic validation (no probabilistic checks)
+- Typed, actionable errors
+- No domain coupling (generic engineering rules)
+- Versioned contracts (do not modify at runtime)
+"""
 
-### Control Flow
-- Explicit step-gated, multi-step pipeline with clear stage boundaries (e.g., derive expected state, execute action, validate outcomes).
-- Support for conditional branching based on runtime signals (e.g., different paths for “valid input” vs “malformed/unknown input” vs “empty outcomes”).
-- Ability to model repeated user-driven transitions (e.g., apply → apply again quickly → clear → reapply) without state corruption.
-- Concurrency/race-awareness: ability to represent “in-flight update” and prevent/queue conflicting steps.
-- Support for multi-dimensional combination logic validation (within-group combination vs across-group combination) in a repeatable way.
+from __future__ import annotations
 
-### State & Memory
-- Strong per-run state object with isolation between runs (no cross-run leakage).
-- State persistence across steps, including externalized state persistence mechanism (generalized from “deep-link/shareable state” requirements).
-- Deterministic canonicalization of externally persisted state (stable ordering/encoding/normalization) once rules are defined.
-- Ability to carry both “expected” and “observed” state (UI/API/URL equivalents generalized to “external interface state” and “system response state”) for oracle evaluation.
-- Support for unknown/TBD fields as first-class placeholders while still producing valid artifacts.
+from dataclasses import dataclass, field
+from typing import List, Optional, Dict, Any, Tuple
 
-### Validation & Failure Handling
-- Schema-gated checkpoints at multiple stages (inputs, intermediate derived expectations, final outputs).
-- Ability to halt/hold execution on high ambiguity and emit structured “needs-clarification” outputs (without inventing defaults).
-- Typed failure propagation with specific failure categories (e.g., externalized-state mismatch, combination-logic mismatch, count consistency mismatch, interaction-blocking failure).
-- Deterministic test oracles must be representable even when some requirements remain TBD, via explicit “UNKNOWN/TBD” handling.
+from pydantic import BaseModel, Field, ConfigDict
 
-### Observability & Replay
-- Step-level logging with stable identifiers (run_id, step_id) and artifact pinning for every stage.
-- Replayability: rehydrate a run using stored inputs + pinned contracts + deterministic settings to reproduce the same sequence and outputs.
-- Ability to attach evidence bundles (e.g., captured external interface snapshots, request/response traces generalized) per step.
-- Support for defining and consuming stable completion signals for asynchronous updates (generalized “loading start/end” and “results updated” signals).
+from .cir_schema import CanonicalUserStoryCIR
+from .versions import VERSIONS
 
-### Governance & Determinism
-- Contract version pinning across schemas/specs/taxonomies and enforcement of “no runtime drift.”
-- Deterministic execution mode configuration (temperature/seed discipline, stable ordering, no hidden retries that change outputs).
-- Clear separation between: (a) static contracts (schemas/taxonomies), (b) per-run manifests, and (c) per-run produced artifacts.
-- Ability to evolve the system with additive contract deltas (new enums/fields) without breaking existing runs.
 
-## Evaluation Matrix
+# -------------------------
+# Validation error model
+# -------------------------
 
-| Capability / Requirement | LangChain | LangGraph | Strands | Custom Python |
-|--------------------------|-----------|-----------|---------|---------------|
-| Explicit step boundaries / gating | ⚠️ | ✅ | ⚠️ | ✅ |
-| Conditional branching & stop conditions | ⚠️ | ✅ | ⚠️ | ✅ |
-| Concurrency/race-aware modeling (in-flight/queue) | ❌ | ⚠️ | ❌ | ⚠️ |
-| Typed per-run state passing | ⚠️ | ⚠️ | ⚠️ | ✅ |
-| State persistence across steps (rehydration-friendly) | ⚠️ | ⚠️ | ⚠️ | ✅ |
-| Externalized state canonicalization (deterministic) | ⚠️ | ⚠️ | ⚠️ | ✅ |
-| Schema validation checkpoints (multiple gates) | ⚠️ | ⚠️ | ⚠️ | ✅ |
-| Stop/hold on high ambiguity (structured) | ⚠️ | ⚠️ | ⚠️ | ✅ |
-| Typed failure propagation with taxonomy alignment | ⚠️ | ⚠️ | ⚠️ | ✅ |
-| Deterministic execution controls (no hidden drift) | ⚠️ | ⚠️ | ⚠️ | ✅ |
-| Observability hooks (step logs, artifacts) | ⚠️ | ⚠️ | ⚠️ | ✅ |
-| Replayability (run rehydration + repeatable order) | ⚠️ | ⚠️ | ⚠️ | ✅ |
-| Contract version pinning & enforcement | ❌ | ❌ | ❌ | ✅ |
+class ValidationErrorItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-Legend: ✅ Supported natively | ⚠️ Supported with workarounds / risk | ❌ Not supported / conflicts with requirement
+    code: str = Field(..., description="Stable error code.")
+    severity: str = Field(..., description="low|medium|high")
+    location: str = Field(..., description="Pointer-like location path (e.g., story_metadata.name).")
+    message: str = Field(..., description="Human-readable message.")
+    suggested_fix: str = Field(default="TBD", description="Concrete remediation guidance.")
+    notes: Optional[str] = Field(default=None)
 
-## Framework-Specific Analysis (Sanitized)
 
-### LangChain
-- Fit assessment:
-  - Good for composing tool-calls and linear chains, but tends to blur “explicit step contract boundaries” unless you impose strict wrappers.
-  - Control flow beyond linear sequences often becomes implicit (callbacks, agent loops), which is risky for deterministic, contract-driven pipelines.
-- Workarounds required:
-  - Build a strict “run controller” around chains to enforce: step IDs, schema gates, pinned settings, and stable ordering.
-  - Implement your own replay store and artifact persistence; treat LangChain as an execution library, not the orchestrator.
-  - Avoid agentic auto-loops or constrain them heavily (fixed max-steps, explicit stop rules) to reduce drift.
-- Primary risks (architecture/ops/maintainability):
-  - Architectural: abstraction leaks via hidden retries/tool selection, implicit branching, and framework-driven control flow.
-  - Operational: harder to guarantee replayability and determinism without deep instrumentation; debugging often requires framework internals familiarity.
-  - Maintainability: ecosystem churn and version drift can change defaults; upgrades risk altering execution behavior.
+class ValidationReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-### LangGraph
-- Fit assessment:
-  - Stronger match for explicit graph-based control flow (branching, loops) and “step as a node” modeling, which aligns with gated pipelines.
-  - Still requires careful discipline for determinism and contract pinning; state typing is possible but not inherently contract-enforced.
-- Workarounds required:
-  - Define a strict state schema and enforce validation at node boundaries (pre/post conditions) externally or via wrappers.
-  - Implement contract version enforcement and run rehydration persistence as a first-class layer.
-  - Model concurrency/race conditions explicitly (e.g., in-flight flags, event ordering) and keep execution single-threaded where determinism is mandatory.
-- Primary risks (architecture/ops/maintainability):
-  - Architectural: graph complexity can grow quickly; if not governed, it becomes a “logic maze” with hard-to-audit transitions.
-  - Operational: replay is feasible but only if all inputs/events and ordering are captured; async steps can introduce nondeterministic interleavings.
-  - Maintainability: coupling to graph conventions; refactors can be disruptive without strong migration tooling and compatibility discipline.
+    contract_version: str = Field(default=VERSIONS.VALIDATION_SPEC)
+    is_valid: bool
+    errors: List[ValidationErrorItem] = Field(default_factory=list)
+    warnings: List[ValidationErrorItem] = Field(default_factory=list)
 
-### Strands
-- Fit assessment:
-  - Potentially helpful for higher-level agent patterns, but typically optimized for flexible agent behavior rather than strict contract-gated determinism.
-  - If it encourages implicit decision-making or dynamic tool routing, it conflicts with “no runtime drift” governance goals.
-- Workarounds required:
-  - Constrain the runtime: fixed step plans, explicit transitions, explicit stopping criteria, disabled/limited autonomy.
-  - Wrap with a deterministic run engine: schema gates, artifact pinning, stable ordering, and explicit failure taxonomy mapping.
-- Primary risks (architecture/ops/maintainability):
-  - Architectural: hidden control flow and “agent autonomy” are hard to reconcile with strict determinism and auditability.
-  - Operational: instrumentation/replay often becomes “best effort” unless the framework exposes deep hooks.
-  - Maintainability: risk of lock-in to framework-specific abstractions and rapidly evolving APIs.
+    def add_error(self, item: ValidationErrorItem) -> None:
+        self.errors.append(item)
 
-### Custom Python Orchestration (no agent framework)
-- Fit assessment:
-  - Best alignment with strict determinism, schema gates, contract version pinning, and replayability requirements.
-  - Enables designing the pipeline directly around run manifests, explicit step functions, and validation checkpoints.
-- Workarounds required:
-  - You must build or standardize: graph/branch modeling (if needed), artifact persistence, observability conventions, and developer ergonomics.
-  - If complex branching/loops become common, you may need a lightweight internal DAG/state-machine library (still within your governance model).
-- Primary risks (architecture/ops/maintainability):
-  - Architectural: risk of reinventing orchestration patterns poorly (ad-hoc branching, inconsistent step interfaces) without strong standards.
-  - Operational: initial investment is higher; reliability depends on disciplined engineering (logging, storage, idempotency).
-  - Maintainability: long-term success depends on documentation, templates, and strong review practices; otherwise divergence across teams is likely.
+    def add_warning(self, item: ValidationErrorItem) -> None:
+        self.warnings.append(item)
 
-## Key Trade-offs (Sanitized)
-- Determinism & governance vs speed of adoption: higher-level agent frameworks accelerate prototyping but introduce hidden behavior that undermines strict replay and contract pinning.
-- Explicitness vs convenience: graph/state-machine approaches better express branching and stop/hold logic, but require governance to prevent complexity sprawl.
-- Observability/replay ownership: regardless of framework, enterprise-grade replayability typically requires a dedicated run-store + artifact model; relying on framework defaults is risky.
-- Handling TBD/UNKNOWN requirements: systems that treat “unknowns” as first-class and can hard-stop with structured ambiguity outputs align better with strict pipelines.
 
-## Frameworks That Fail Critical Requirements
-- LangChain: ❌ Contract version pinning & enforcement (must be external), ❌ concurrency/race modeling (not a native focus); determinism/replay rely on substantial wrapping.
-- LangGraph: ❌ Contract version pinning & enforcement (must be external); concurrency/race modeling is ⚠️ and requires disciplined modeling.
-- Strands: ❌ Contract version pinning & enforcement (must be external), ❌ concurrency/race modeling (not a native focus); autonomy-oriented behavior risks determinism drift.
+# -------------------------
+# Policy configuration
+# -------------------------
 
-## Frameworks That Align with Requirements
-- Custom Python Orchestration: strongest alignment for determinism, schema gates, replayability, and contract governance (with the trade-off of higher build effort).
-- LangGraph: good alignment for explicit branching/step modeling, but requires an external governance layer for contract pinning, schema gates, and deterministic replay discipline.
+@dataclass(frozen=True)
+class ValidationPolicy:
+    """
+    Static governance rules for validating CIR instances.
+    Keep these rules generic and deterministic.
+    """
+    # Minimum required counts
+    min_acceptance_criteria: int = 1
+    min_preconditions_per_ac: int = 0
+    min_expected_outcomes_per_ac: int = 1
+
+    # Limits to prevent runaway verbosity / non-deterministic inflation
+    max_acceptance_criteria: int = 50
+    max_steps_like_items_per_ac: int = 50  # preconditions+triggers+expected_outcome total cap
+
+    # TBD / UNKNOWN policy
+    allow_tbd_fields: bool = True
+    max_tbd_density_ratio: float = 0.35  # if too many TBDs, mark as warning/high risk
+
+    # Generic requirement: if externalized state required, rules should be present
+    require_rules_if_externalized_state: bool = True
+
+    # Basic metadata requirements
+    require_story_name: bool = True
+    require_story_id: bool = True
+
+
+DEFAULT_POLICY = ValidationPolicy()
+
+
+# -------------------------
+# Helper functions
+# -------------------------
+
+def _count_tbd_unknown(values: List[str]) -> Tuple[int, int]:
+    """
+    Returns (tbd_unknown_count, total_count) for a list of strings.
+    """
+    total = len(values)
+    tbd = 0
+    for v in values:
+        s = (v or "").strip().upper()
+        if s in {"TBD", "UNKNOWN"} or s.startswith("TBD") or s.startswith("UNKNOWN"):
+            tbd += 1
+    return tbd, total
+
+
+def _safe_path(*parts: str) -> str:
+    return ".".join(parts)
+
+
+# -------------------------
+# Main validator
+# -------------------------
+
+def validate_cir(cir: CanonicalUserStoryCIR, policy: ValidationPolicy = DEFAULT_POLICY) -> ValidationReport:
+    """
+    Validate a CanonicalUserStoryCIR instance against governance rules.
+
+    Returns a ValidationReport with:
+    - errors: violations that should fail the pipeline step (hard stop)
+    - warnings: violations that should be surfaced but may allow proceed (soft stop)
+
+    Note: This function does NOT mutate the CIR.
+    """
+    report = ValidationReport(is_valid=True)
+
+    # ---- Metadata checks ----
+    if policy.require_story_id and not (cir.story_metadata.story_id or "").strip():
+        report.add_error(
+            ValidationErrorItem(
+                code="VAL-META-001",
+                severity="high",
+                location=_safe_path("story_metadata", "story_id"),
+                message="Missing required story_id.",
+                suggested_fix="Populate story_id from source system or filename stem."
+            )
+        )
+
+    if policy.require_story_name and not (cir.story_metadata.name or "").strip():
+        report.add_error(
+            ValidationErrorItem(
+                code="VAL-META-002",
+                severity="high",
+                location=_safe_path("story_metadata", "name"),
+                message="Missing required story name/title.",
+                suggested_fix="Populate story name from story header/title."
+            )
+        )
+
+    # ---- Acceptance criteria checks ----
+    ac_count = len(cir.functional_requirements)
+    if ac_count < policy.min_acceptance_criteria:
+        report.add_error(
+            ValidationErrorItem(
+                code="VAL-AC-001",
+                severity="high",
+                location=_safe_path("functional_requirements"),
+                message=f"At least {policy.min_acceptance_criteria} acceptance criterion is required; found {ac_count}.",
+                suggested_fix="Extract acceptance criteria from story text or mark story as ambiguous and stop."
+            )
+        )
+
+    if ac_count > policy.max_acceptance_criteria:
+        report.add_warning(
+            ValidationErrorItem(
+                code="VAL-AC-002",
+                severity="medium",
+                location=_safe_path("functional_requirements"),
+                message=f"High number of acceptance criteria ({ac_count}) may indicate over-segmentation.",
+                suggested_fix="Confirm whether ACs should be grouped or whether scope is too broad."
+            )
+        )
+
+    # ---- Per-AC content checks ----
+    total_strings: List[str] = []
+    tbd_strings: List[str] = []
+
+    for i, ac in enumerate(cir.functional_requirements):
+        ac_path = f"functional_requirements[{i}]"
+
+        if not (ac.ac_id or "").strip():
+            report.add_error(
+                ValidationErrorItem(
+                    code="VAL-AC-003",
+                    severity="high",
+                    location=_safe_path(ac_path, "ac_id"),
+                    message="Acceptance criterion is missing ac_id.",
+                    suggested_fix="Assign stable ac_id (e.g., AC-1, AC-2) preserving original order."
+                )
+            )
+
+        if not (ac.description or "").strip():
+            report.add_error(
+                ValidationErrorItem(
+                    code="VAL-AC-004",
+                    severity="high",
+                    location=_safe_path(ac_path, "description"),
+                    message="Acceptance criterion is missing description.",
+                    suggested_fix="Add a short, generic description derived from the story text."
+                )
+            )
+
+        # Expect at least one expected outcome (Then)
+        if len(ac.expected_outcome) < policy.min_expected_outcomes_per_ac:
+            report.add_error(
+                ValidationErrorItem(
+                    code="VAL-AC-005",
+                    severity="high",
+                    location=_safe_path(ac_path, "expected_outcome"),
+                    message="Acceptance criterion must include at least one expected outcome.",
+                    suggested_fix="Extract 'Then' behavior from story; if missing, log ambiguity and stop."
+                )
+            )
+
+        # Cap total step-like items to avoid inflation
+        step_like_total = len(ac.preconditions) + len(ac.triggers) + len(ac.expected_outcome)
+        if step_like_total > policy.max_steps_like_items_per_ac:
+            report.add_warning(
+                ValidationErrorItem(
+                    code="VAL-AC-006",
+                    severity="medium",
+                    location=_safe_path(ac_path),
+                    message=f"Acceptance criterion has many step-like items ({step_like_total}); may be too verbose.",
+                    suggested_fix="Consolidate steps while preserving meaning; avoid splitting into micro-steps."
+                )
+            )
+
+        # Track TBD density
+        total_strings.extend(ac.preconditions + ac.triggers + ac.expected_outcome + [ac.description])
+        for s in ac.preconditions + ac.triggers + ac.expected_outcome + [ac.description]:
+            if (s or "").strip().upper().startswith(("TBD", "UNKNOWN")) or (s or "").strip().upper() in {"TBD", "UNKNOWN"}:
+                tbd_strings.append(s)
+
+    # ---- Externalized state rules ----
+    if cir.state_and_external_persistence.externalized_state_required and policy.require_rules_if_externalized_state:
+        if not cir.state_and_external_persistence.rules:
+            report.add_warning(
+                ValidationErrorItem(
+                    code="VAL-STATE-001",
+                    severity="medium",
+                    location=_safe_path("state_and_external_persistence", "rules"),
+                    message="Externalized state persistence is required but no rules were captured.",
+                    suggested_fix="Add at least one rule describing persistence format/constraints; otherwise mark TBD and raise ambiguity."
+                )
+            )
+
+    # ---- TBD density checks (warning-level by default) ----
+    tbd_count, total_count = _count_tbd_unknown(total_strings)
+    if total_count > 0:
+        ratio = tbd_count / total_count
+        if not policy.allow_tbd_fields and tbd_count > 0:
+            report.add_error(
+                ValidationErrorItem(
+                    code="VAL-TBD-001",
+                    severity="high",
+                    location="*",
+                    message="TBD/UNKNOWN values are not allowed by current policy.",
+                    suggested_fix="Resolve all TBD/UNKNOWN items before proceeding."
+                )
+            )
+        elif ratio > policy.max_tbd_density_ratio:
+            report.add_warning(
+                ValidationErrorItem(
+                    code="VAL-TBD-002",
+                    severity="medium",
+                    location="*",
+                    message=f"High TBD/UNKNOWN density detected ({ratio:.0%}). This may reduce downstream determinism.",
+                    suggested_fix="Review ambiguities and resolve high-impact TBDs before generating scripts/data."
+                )
+            )
+
+    # ---- Finalize validity ----
+    if report.errors:
+        report.is_valid = False
+
+    return report
