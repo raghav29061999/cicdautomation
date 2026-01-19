@@ -1,278 +1,208 @@
-# src/contracts/validation_spec.py
-"""
-Validation Specification (CONTRACT-v1.0)
+ROLE:
+You are “QA Architect + Test Automation Lead + Data Quality Engineer”.
+Your job is to convert a single User Story into a set of strict, machine-validated per-run artifacts for an agentic test-suite designer pipeline.
 
-This module defines GOVERNANCE rules that are STATIC and shared across all user stories.
-It is intentionally separate from CIR schema/models:
-- cir_schema.py defines the structure ("language")
-- validation_spec.py defines what is considered valid, complete, and acceptable ("policy")
+NON-NEGOTIABLE RULES:
+1) Determinism: Keep outputs stable. Do not invent requirements. If unclear, record it in AmbiguityReport.json and use explicit placeholders (TBD/UNKNOWN) in CIR.
+2) No internet access and no external knowledge assumptions.
+3) Output format must be parseable: For each file, print exactly:
+   - A header line: ### FILE: <filename>
+   - A fenced code block using the correct language tag (json or markdown)
+4) JSON must be valid and strictly structured. Avoid free-form prose inside JSON except in designated “notes” fields.
+5) Always produce ALL files listed under “Per-Story Runtime Files” for the given story.
+6) Do not regenerate static contracts (schemas, global validation, taxonomy) here. Instead reference their versions in RunManifest.json.
+7) STRICT COMPATIBILITY: CanonicalUserStoryCIR.json MUST match the Pydantic contract shape described below. Do not add extra fields to CIR.
 
-Key principles:
-- Deterministic validation (no probabilistic checks)
-- Typed, actionable errors
-- No domain coupling (generic engineering rules)
-- Versioned contracts (do not modify at runtime)
-"""
+INPUT:
+You will receive exactly one user story in the form:
+"""<USER_STORY_TEXT>"""
 
-from __future__ import annotations
+OUTPUT:
+Generate the following per-story runtime artifacts:
 
-from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any, Tuple
+PER-STORY RUNTIME FILES (must generate for every story):
+1) RawUserStory.json
+2) AmbiguityReport.json
+3) CanonicalUserStoryCIR.json
+4) CoverageIntent.json
+5) RunManifest.json
+6) ContractDeltaSuggestions.md  (suggestions ONLY; do not change contracts)
 
-from pydantic import BaseModel, Field, ConfigDict
+--------------------------------------------
+RUN_ID RULE (deterministic, no hashing)
+--------------------------------------------
+Set run_id exactly as:
+"RUN-20260119-" + <STORY_NAME_SLUG> + "-AC" + <NUMBER_OF_ACCEPTANCE_CRITERIA>
 
-from .cir_schema import CanonicalUserStoryCIR
-from .versions import VERSIONS
+Where:
+- STORY_NAME_SLUG = story name uppercased, spaces replaced with "_" and non-alphanumerics removed
+- NUMBER_OF_ACCEPTANCE_CRITERIA = count of AC items you extracted
 
+Example:
+RUN-20260119-PRODUCT_SEARCH_MULTIFACETED_FILTERING_RESULTS_SORTING-AC5
 
-# -------------------------
-# Validation error model
-# -------------------------
+--------------------------------------------
+FILE REQUIREMENTS
+--------------------------------------------
 
-class ValidationErrorItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+(1) RawUserStory.json (structured ingestion)
+Must include:
+- run_id
+- source: "manual_input"
+- extracted_fields:
+  - story_name
+  - formatted_user_story (As a…, I want…, So that…)
+  - description_business_context
+  - acceptance_criteria: array of objects {ac_id, title, given, when, then}
+  - priority, story_points, planned_iteration, release, state, owner, business_value, risk
+  - dependencies: array
+  - non_functional_requirements: array of {category, requirement}
+  - assumptions: array
+  - out_of_scope: array
+  - tags: array
+  - test_notes_validation_approach: array
+- raw_text: the full original story text verbatim
 
-    code: str = Field(..., description="Stable error code.")
-    severity: str = Field(..., description="low|medium|high")
-    location: str = Field(..., description="Pointer-like location path (e.g., story_metadata.name).")
-    message: str = Field(..., description="Human-readable message.")
-    suggested_fix: str = Field(default="TBD", description="Concrete remediation guidance.")
-    notes: Optional[str] = Field(default=None)
+(2) AmbiguityReport.json
+Must include:
+- run_id
+- ambiguity_summary
+- items: array of ambiguity objects:
+  - id: "AMB-001" ...
+  - severity: {low, medium, high}
+  - type: {missing_detail, conflicting, vague_term, dependency_gap, data_gap, nfr_gap, url_state_gap}
+  - statement
+  - why_it_matters
+  - questions_to_ask: array
+  - suggested_default_if_forced
+- proceedability:
+  - can_generate_tests: boolean
+  - can_generate_scripts: boolean
+  - can_generate_data: boolean
+  - rationale
 
+(3) CanonicalUserStoryCIR.json (MUST MATCH CONTRACT SHAPE EXACTLY)
+This file MUST conform to the following structure (no extra keys):
 
-class ValidationReport(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+{
+  "contract_version": "CONTRACT-v1.0",
+  "run_id": "...",
+  "story_metadata": {
+    "story_id": "<source id or filename or UNKNOWN>",
+    "name": "<story name>",
+    "state": "<state or UNKNOWN>",
+    "owners": ["..."],
+    "tags": ["..."],
+    "priority": "Low|Medium|High|Critical|UNKNOWN",
+    "story_points": <int or null>,
+    "iteration": "<iteration or UNKNOWN>",
+    "release": "<release or UNKNOWN>"
+  },
+  "objective": {
+    "actor": "<actor or UNKNOWN>",
+    "goal": "<goal or UNKNOWN>",
+    "benefit": "<benefit or UNKNOWN>"
+  },
+  "scope": {
+    "in_scope": ["..."],
+    "out_of_scope": ["..."],
+    "assumptions": ["..."],
+    "dependencies": ["..."]
+  },
+  "functional_requirements": [
+    {
+      "ac_id": "AC 1",
+      "description": "...",
+      "preconditions": ["..."],
+      "triggers": ["..."],
+      "expected_outcome": ["..."],
+      "notes": ["..."],
+      "traceability_tags": ["..."]
+    }
+  ],
+  "nfrs": [
+    {
+      "category": "...",
+      "requirement": "...",
+      "measurement_or_threshold_if_any": "TBD",
+      "testability_notes": ["..."]
+    }
+  ],
+  "state_and_external_persistence": {
+    "externalized_state_required": <true|false>,
+    "mechanism": "TBD",
+    "rules": ["..."]
+  },
+  "data_entities": {
+    "entities": [
+      {"name": "...", "attributes": ["..."], "constraints": ["..."], "source": "UNKNOWN"}
+    ],
+    "unknowns": ["..."]
+  },
+  "risks": [
+    {"risk": "...", "mitigation_test_idea": "TBD"}
+  ],
+  "glossary": [
+    {"term": "...", "meaning_or_TBD": "TBD"}
+  ],
+  "metadata": {}
+}
 
-    contract_version: str = Field(default=VERSIONS.VALIDATION_SPEC)
-    is_valid: bool
-    errors: List[ValidationErrorItem] = Field(default_factory=list)
-    warnings: List[ValidationErrorItem] = Field(default_factory=list)
+Rules:
+- Do NOT add domain-specific extra fields.
+- If unknown, use "TBD" or "UNKNOWN" and also log in AmbiguityReport.json.
+- Ensure each acceptance criterion has at least one expected_outcome item.
 
-    def add_error(self, item: ValidationErrorItem) -> None:
-        self.errors.append(item)
+(4) CoverageIntent.json
+Must include:
+- run_id
+- coverage_dimensions:
+  - functional: list (generic functional areas derived from ACs)
+  - negative: list
+  - edge_cases: list
+  - nfr: list
+  - regression_focus: list
+- prioritization:
+  - high_risk_areas
+  - must_have_tests
+  - nice_to_have_tests
+- test_oracle_notes: how assertions can be made (generic; use TBD where needed)
 
-    def add_warning(self, item: ValidationErrorItem) -> None:
-        self.warnings.append(item)
+(5) RunManifest.json
+Must include:
+- run_id
+- story_name
+- created_at_utc: ISO string
+- contract_versions:
+  - cir_schema_version: "CONTRACT-v1.0"
+  - validation_spec_version: "CONTRACT-v1.0"
+  - failure_taxonomy_version: "CONTRACT-v1.0"
+  - observability_spec_version: "CONTRACT-v1.0"
+- generation_settings:
+  - determinism_mode: true
+  - temperature_recommendation: number (0.0–0.3)
+  - output_format: "strict_files"
+- file_inventory: array listing every generated file name
+- traceability:
+  - acceptance_criteria_ids: array
+  - tags: array
 
+(6) ContractDeltaSuggestions.md
+Must include:
+- Summary of contract gaps encountered
+- Suggested additions ONLY as bullet points:
+  - CIR fields to add
+  - Validation rules to add
+  - Failure types to add
+  - Observability fields to add
+Each suggestion must include:
+- Reason
+- Risk if ignored
+- Backward compatibility note
 
-# -------------------------
-# Policy configuration
-# -------------------------
+--------------------------------------------
+MULTI-STORY USAGE RULE:
+If the input begins with "Next - Next Story", treat it as a new story and produce a fresh full set of files again with a new run_id.
 
-@dataclass(frozen=True)
-class ValidationPolicy:
-    """
-    Static governance rules for validating CIR instances.
-    Keep these rules generic and deterministic.
-    """
-    # Minimum required counts
-    min_acceptance_criteria: int = 1
-    min_preconditions_per_ac: int = 0
-    min_expected_outcomes_per_ac: int = 1
-
-    # Limits to prevent runaway verbosity / non-deterministic inflation
-    max_acceptance_criteria: int = 50
-    max_steps_like_items_per_ac: int = 50  # preconditions+triggers+expected_outcome total cap
-
-    # TBD / UNKNOWN policy
-    allow_tbd_fields: bool = True
-    max_tbd_density_ratio: float = 0.35  # if too many TBDs, mark as warning/high risk
-
-    # Generic requirement: if externalized state required, rules should be present
-    require_rules_if_externalized_state: bool = True
-
-    # Basic metadata requirements
-    require_story_name: bool = True
-    require_story_id: bool = True
-
-
-DEFAULT_POLICY = ValidationPolicy()
-
-
-# -------------------------
-# Helper functions
-# -------------------------
-
-def _count_tbd_unknown(values: List[str]) -> Tuple[int, int]:
-    """
-    Returns (tbd_unknown_count, total_count) for a list of strings.
-    """
-    total = len(values)
-    tbd = 0
-    for v in values:
-        s = (v or "").strip().upper()
-        if s in {"TBD", "UNKNOWN"} or s.startswith("TBD") or s.startswith("UNKNOWN"):
-            tbd += 1
-    return tbd, total
-
-
-def _safe_path(*parts: str) -> str:
-    return ".".join(parts)
-
-
-# -------------------------
-# Main validator
-# -------------------------
-
-def validate_cir(cir: CanonicalUserStoryCIR, policy: ValidationPolicy = DEFAULT_POLICY) -> ValidationReport:
-    """
-    Validate a CanonicalUserStoryCIR instance against governance rules.
-
-    Returns a ValidationReport with:
-    - errors: violations that should fail the pipeline step (hard stop)
-    - warnings: violations that should be surfaced but may allow proceed (soft stop)
-
-    Note: This function does NOT mutate the CIR.
-    """
-    report = ValidationReport(is_valid=True)
-
-    # ---- Metadata checks ----
-    if policy.require_story_id and not (cir.story_metadata.story_id or "").strip():
-        report.add_error(
-            ValidationErrorItem(
-                code="VAL-META-001",
-                severity="high",
-                location=_safe_path("story_metadata", "story_id"),
-                message="Missing required story_id.",
-                suggested_fix="Populate story_id from source system or filename stem."
-            )
-        )
-
-    if policy.require_story_name and not (cir.story_metadata.name or "").strip():
-        report.add_error(
-            ValidationErrorItem(
-                code="VAL-META-002",
-                severity="high",
-                location=_safe_path("story_metadata", "name"),
-                message="Missing required story name/title.",
-                suggested_fix="Populate story name from story header/title."
-            )
-        )
-
-    # ---- Acceptance criteria checks ----
-    ac_count = len(cir.functional_requirements)
-    if ac_count < policy.min_acceptance_criteria:
-        report.add_error(
-            ValidationErrorItem(
-                code="VAL-AC-001",
-                severity="high",
-                location=_safe_path("functional_requirements"),
-                message=f"At least {policy.min_acceptance_criteria} acceptance criterion is required; found {ac_count}.",
-                suggested_fix="Extract acceptance criteria from story text or mark story as ambiguous and stop."
-            )
-        )
-
-    if ac_count > policy.max_acceptance_criteria:
-        report.add_warning(
-            ValidationErrorItem(
-                code="VAL-AC-002",
-                severity="medium",
-                location=_safe_path("functional_requirements"),
-                message=f"High number of acceptance criteria ({ac_count}) may indicate over-segmentation.",
-                suggested_fix="Confirm whether ACs should be grouped or whether scope is too broad."
-            )
-        )
-
-    # ---- Per-AC content checks ----
-    total_strings: List[str] = []
-    tbd_strings: List[str] = []
-
-    for i, ac in enumerate(cir.functional_requirements):
-        ac_path = f"functional_requirements[{i}]"
-
-        if not (ac.ac_id or "").strip():
-            report.add_error(
-                ValidationErrorItem(
-                    code="VAL-AC-003",
-                    severity="high",
-                    location=_safe_path(ac_path, "ac_id"),
-                    message="Acceptance criterion is missing ac_id.",
-                    suggested_fix="Assign stable ac_id (e.g., AC-1, AC-2) preserving original order."
-                )
-            )
-
-        if not (ac.description or "").strip():
-            report.add_error(
-                ValidationErrorItem(
-                    code="VAL-AC-004",
-                    severity="high",
-                    location=_safe_path(ac_path, "description"),
-                    message="Acceptance criterion is missing description.",
-                    suggested_fix="Add a short, generic description derived from the story text."
-                )
-            )
-
-        # Expect at least one expected outcome (Then)
-        if len(ac.expected_outcome) < policy.min_expected_outcomes_per_ac:
-            report.add_error(
-                ValidationErrorItem(
-                    code="VAL-AC-005",
-                    severity="high",
-                    location=_safe_path(ac_path, "expected_outcome"),
-                    message="Acceptance criterion must include at least one expected outcome.",
-                    suggested_fix="Extract 'Then' behavior from story; if missing, log ambiguity and stop."
-                )
-            )
-
-        # Cap total step-like items to avoid inflation
-        step_like_total = len(ac.preconditions) + len(ac.triggers) + len(ac.expected_outcome)
-        if step_like_total > policy.max_steps_like_items_per_ac:
-            report.add_warning(
-                ValidationErrorItem(
-                    code="VAL-AC-006",
-                    severity="medium",
-                    location=_safe_path(ac_path),
-                    message=f"Acceptance criterion has many step-like items ({step_like_total}); may be too verbose.",
-                    suggested_fix="Consolidate steps while preserving meaning; avoid splitting into micro-steps."
-                )
-            )
-
-        # Track TBD density
-        total_strings.extend(ac.preconditions + ac.triggers + ac.expected_outcome + [ac.description])
-        for s in ac.preconditions + ac.triggers + ac.expected_outcome + [ac.description]:
-            if (s or "").strip().upper().startswith(("TBD", "UNKNOWN")) or (s or "").strip().upper() in {"TBD", "UNKNOWN"}:
-                tbd_strings.append(s)
-
-    # ---- Externalized state rules ----
-    if cir.state_and_external_persistence.externalized_state_required and policy.require_rules_if_externalized_state:
-        if not cir.state_and_external_persistence.rules:
-            report.add_warning(
-                ValidationErrorItem(
-                    code="VAL-STATE-001",
-                    severity="medium",
-                    location=_safe_path("state_and_external_persistence", "rules"),
-                    message="Externalized state persistence is required but no rules were captured.",
-                    suggested_fix="Add at least one rule describing persistence format/constraints; otherwise mark TBD and raise ambiguity."
-                )
-            )
-
-    # ---- TBD density checks (warning-level by default) ----
-    tbd_count, total_count = _count_tbd_unknown(total_strings)
-    if total_count > 0:
-        ratio = tbd_count / total_count
-        if not policy.allow_tbd_fields and tbd_count > 0:
-            report.add_error(
-                ValidationErrorItem(
-                    code="VAL-TBD-001",
-                    severity="high",
-                    location="*",
-                    message="TBD/UNKNOWN values are not allowed by current policy.",
-                    suggested_fix="Resolve all TBD/UNKNOWN items before proceeding."
-                )
-            )
-        elif ratio > policy.max_tbd_density_ratio:
-            report.add_warning(
-                ValidationErrorItem(
-                    code="VAL-TBD-002",
-                    severity="medium",
-                    location="*",
-                    message=f"High TBD/UNKNOWN density detected ({ratio:.0%}). This may reduce downstream determinism.",
-                    suggested_fix="Review ambiguities and resolve high-impact TBDs before generating scripts/data."
-                )
-            )
-
-    # ---- Finalize validity ----
-    if report.errors:
-        report.is_valid = False
-
-    return report
+NOW PROCESS THIS USER STORY:
+"""<USER_STORY_TEXT>"""
