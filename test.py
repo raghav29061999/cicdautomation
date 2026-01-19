@@ -1,199 +1,183 @@
-import json
-from typing import Iterable, List, Optional, Union
-import pandas as pd
+```python
+# src/contracts/cir_schema.py
+"""
+Canonical Intermediate Representation (CIR) - CONTRACT-v1.0
+
+This module defines the typed internal "language" for your agentic pipeline.
+These schemas are STATIC (shared across all stories) and must be versioned.
+Per-story runs will produce *instances* of these models.
+
+Pydantic v2 models.
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field, ConfigDict
 
 
-def _coerce_cell_to_dict(cell: Union[pd.Series, dict, str, None]) -> Optional[dict]:
+CONTRACT_VERSION = "CONTRACT-v1.0"
+
+
+# -------------------------
+# Enums (keep tight + generic)
+# -------------------------
+
+class Priority(str, Enum):
+    low = "Low"
+    medium = "Medium"
+    high = "High"
+    critical = "Critical"
+    unknown = "UNKNOWN"
+
+
+class RiskLevel(str, Enum):
+    low = "Low"
+    medium = "Medium"
+    high = "High"
+    unknown = "UNKNOWN"
+
+
+class RequirementType(str, Enum):
+    functional = "functional"
+    non_functional = "non_functional"
+
+
+# -------------------------
+# Core Models
+# -------------------------
+
+class StoryMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Prefer stable IDs from source systems; if not present, use filename stem
+    story_id: str = Field(..., description="Stable story identifier (source ID or derived from filename).")
+    name: str = Field(..., description="Story name/title.")
+    state: str = Field(default="UNKNOWN", description="Lifecycle state (e.g., Defined/In Progress/Done).")
+    owners: List[str] = Field(default_factory=list, description="Owners/roles responsible.")
+    tags: List[str] = Field(default_factory=list, description="Tags/labels for grouping.")
+    priority: Priority = Field(default=Priority.unknown)
+    story_points: Optional[int] = Field(default=None, ge=0)
+    iteration: str = Field(default="UNKNOWN", description="Planned iteration/sprint/PI.")
+    release: str = Field(default="UNKNOWN", description="Release/train identifier.")
+
+
+class Objective(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    actor: str = Field(default="UNKNOWN", description="Actor/persona.")
+    goal: str = Field(default="UNKNOWN", description="What they want to achieve.")
+    benefit: str = Field(default="UNKNOWN", description="Why it matters / expected value.")
+
+
+class Scope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    in_scope: List[str] = Field(default_factory=list)
+    out_of_scope: List[str] = Field(default_factory=list)
+    assumptions: List[str] = Field(default_factory=list)
+    dependencies: List[str] = Field(default_factory=list)
+
+
+class AcceptanceCriterionCIR(BaseModel):
     """
-    Best-effort conversion of a single cell into a Python dict.
-    This covers common cases we see in the wild:
-      - dict: already good
-      - pandas Series: convert to dict via to_dict()
-      - JSON string: parse it
-      - None/NaN or unsupported: return None
+    Canonical form of an acceptance criterion, normalized for downstream steps.
+    Keep this generic: no domain entities required, just structured intent.
     """
-    if cell is None or (isinstance(cell, float) and pd.isna(cell)):  # handle NaN
-        return None
+    model_config = ConfigDict(extra="forbid")
 
-    if isinstance(cell, dict):
-        return cell
+    ac_id: str = Field(..., description="Acceptance criteria ID (e.g., AC 1).")
+    description: str = Field(..., description="Sanitized description (no long prose).")
 
-    if isinstance(cell, pd.Series):
-        return cell.to_dict()
+    preconditions: List[str] = Field(default_factory=list, description="Given/preconditions.")
+    triggers: List[str] = Field(default_factory=list, description="When/triggers or user actions.")
+    expected_outcome: List[str] = Field(default_factory=list, description="Then/expected outcomes.")
 
-    if isinstance(cell, str):
-        cell = cell.strip()
-        # Try to parse as JSON if it looks like JSON
-        if (cell.startswith("{") and cell.endswith("}")) or (cell.startswith("[") and cell.endswith("]")):
-            try:
-                parsed = json.loads(cell)
-                # We only accept dicts here; if it's a list, we'll wrap it
-                if isinstance(parsed, dict):
-                    return parsed
-                elif isinstance(parsed, list):
-                    # If the cell is actually a list of dicts, normalize as {"value": parsed}
-                    return {"value": parsed}
-            except json.JSONDecodeError:
-                return None
-
-    # Unsupported shape
-    return None
+    notes: List[str] = Field(default_factory=list, description="Additional clarifications or TBD notes.")
+    traceability_tags: List[str] = Field(default_factory=list, description="Tags for mapping tests back to ACs.")
 
 
-def extract_ticket_ids_from_column(
-    df: pd.DataFrame,
-    col: str,
-    value_key: str = "value",
-    ticket_key: str = "ticket_id",
-    unique: bool = True
-) -> List:
+class NFR(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    category: str = Field(..., description="Category (performance, security, UX, accessibility, etc.).")
+    requirement: str = Field(..., description="Requirement text (kept short).")
+    measurement_or_threshold_if_any: str = Field(default="TBD", description="Metric/threshold if specified.")
+    testability_notes: List[str] = Field(default_factory=list, description="How to test/verify at high level.")
+
+
+class UrlStateRequirements(BaseModel):
     """
-    Walk the given column and pull out every ticket_id inside the nested structure.
-
-    Expected shape per cell:
-        cell -> dict-like with key `value`
-        cell[value_key] -> list of dicts
-        each dict -> has key `ticket_id` (configurable via ticket_key)
-
-    Returns a flat Python list of ticket_ids. If `unique=True`, preserves
-    first-seen order while deduplicating.
+    Generic way to represent any externalized state persistence requirements (URL, headers, storage, etc.).
     """
-    out: List = []
+    model_config = ConfigDict(extra="forbid")
 
-    for idx, cell in df[col].items():
-        cell_dict = _coerce_cell_to_dict(cell)
-        if not cell_dict:
-            continue
-
-        # Grab the list under `value_key`
-        nested_list = cell_dict.get(value_key, None)
-        if not isinstance(nested_list, Iterable):
-            continue
-
-        for item in nested_list:
-            # Common case: each item is a dict with key 'ticket_id'
-            if isinstance(item, dict) and ticket_key in item:
-                out.append(item[ticket_key])
-            # If the item is already a scalar ticket id, we’ll accept it
-            elif not isinstance(item, dict):
-                out.append(item)
-
-    if unique:
-        # De-duplicate while preserving order (Python 3.7+ dict preserves insertion order)
-        out = list(dict.fromkeys(out))
-
-    return out
+    externalized_state_required: bool = Field(default=False, description="Whether state must be persisted externally.")
+    mechanism: str = Field(default="TBD", description="e.g., URL parameters, cookies, storage, etc.")
+    rules: List[str] = Field(default_factory=list, description="Rules/constraints for the mechanism (TBD allowed).")
 
 
-def combine_with_ticket_rows(
-    initial_frame: pd.DataFrame,
-    ticket_list: List,
-    source_df: pd.DataFrame,
-    ticket_col: str = "ticket_id",
-    how: str = "concat",  # "concat" | "left_join"
-    join_on: Optional[str] = None
-) -> pd.DataFrame:
+class DataEntity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., description="Entity name (generic).")
+    attributes: List[str] = Field(default_factory=list, description="Key attributes referenced by requirements.")
+    constraints: List[str] = Field(default_factory=list, description="Constraints/validations (TBD allowed).")
+    source: str = Field(default="UNKNOWN", description="Where the data originates (system/service/etc.).")
+
+
+class DataEntitiesSection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entities: List[DataEntity] = Field(default_factory=list)
+    unknowns: List[str] = Field(default_factory=list, description="Data-related unknowns requiring clarification.")
+
+
+class RiskItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    risk: str = Field(..., description="Risk statement (generic).")
+    mitigation_test_idea: str = Field(default="TBD", description="High-level test idea to mitigate/cover the risk.")
+
+
+class GlossaryItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    term: str
+    meaning_or_TBD: str = Field(default="TBD")
+
+
+class CanonicalUserStoryCIR(BaseModel):
     """
-    Combine `initial_frame` with rows pulled from `source_df` for the given tickets.
-
-    Two modes:
-      1) how="concat" (default): filter source_df by ticket_list, then row-wise concat with initial_frame.
-      2) how="left_join": left-merge initial_frame with a filtered slice of source_df on `join_on` (or ticket_col).
-
-    Args:
-        initial_frame: Your starting DataFrame.
-        ticket_list: List of ticket ids to retrieve.
-        source_df: DataFrame that contains rows to be pulled using `ticket_col`.
-        ticket_col: Column name in `source_df` that holds the ticket id.
-        how: "concat" (union rows) or "left_join" (merge columns).
-        join_on: Column name in `initial_frame` to join on (defaults to `ticket_col` if None).
-
-    Returns:
-        Combined DataFrame as per the chosen strategy.
+    Top-level canonical story representation used across the pipeline.
+    This should be stable across all stories (instances vary; schema does not).
     """
-    # Step 1: guard for empty inputs
-    if not isinstance(initial_frame, pd.DataFrame):
-        raise TypeError("initial_frame must be a pandas DataFrame.")
-    if not isinstance(source_df, pd.DataFrame):
-        raise TypeError("source_df must be a pandas DataFrame.")
-    if not isinstance(ticket_list, list):
-        raise TypeError("ticket_list must be a list.")
+    model_config = ConfigDict(extra="forbid")
 
-    # Step 2: pull the relevant rows from source_df
-    filtered = source_df[source_df[ticket_col].isin(ticket_list)].copy()
+    contract_version: str = Field(default=CONTRACT_VERSION)
 
-    if how == "concat":
-        # Row-wise union: just stack the frames. Columns will align where possible.
-        combined = pd.concat([initial_frame, filtered], ignore_index=True, sort=False)
-        return combined
+    run_id: str = Field(..., description="Per-execution run identifier.")
+    story_metadata: StoryMetadata
+    objective: Objective
+    scope: Scope
 
-    elif how == "left_join":
-        # Column-wise join: merge filtered columns onto initial_frame by ticket id
-        key = join_on or ticket_col
+    functional_requirements: List[AcceptanceCriterionCIR] = Field(default_factory=list)
 
-        # Reduce the right side to the key plus unique payload columns (avoid duplicate key columns)
-        right_cols = [c for c in filtered.columns if c != key]
-        right = filtered[[key] + right_cols].drop_duplicates(subset=[key])
+    nfrs: List[NFR] = Field(default_factory=list)
 
-        merged = initial_frame.merge(right, how="left", left_on=key, right_on=key)
-        return merged
-
-    else:
-        raise ValueError('Invalid "how" value. Use "concat" or "left_join".')
-
-
-# --------------------------
-# Example usage (you can delete this in your notebook/script)
-# --------------------------
-if __name__ == "__main__":
-    # Pretend this column is the one with nested dict-like structures
-    df_nested = pd.DataFrame({
-        "payload": [
-            {"value": [{"ticket_id": 101}, {"ticket_id": 102}]},
-            {"value": [{"ticket_id": 103}, {"ticket_id": 102}]},  # 102 repeated
-            pd.Series({"value": [{"ticket_id": 104}]}),          # Series that acts like a dict
-            '{"value": [{"ticket_id": 105}, {"ticket_id": 106}]}' # JSON string form
-        ],
-        "other_col": ["a", "b", "c", "d"]
-    })
-
-    # Source DF that we'll pull rows from
-    source_df = pd.DataFrame({
-        "ticket_id": [100, 101, 102, 103, 104, 105, 200],
-        "desc": ["x100", "x101", "x102", "x103", "x104", "x105", "x200"],
-        "status": ["new", "open", "open", "closed", "in-progress", "new", "new"]
-    })
-
-    # Initial DF (whatever you already have)
-    initial_df = pd.DataFrame({
-        "ticket_id": [1, 2, 3],
-        "note": ["seed-1", "seed-2", "seed-3"]
-    })
-
-    # 1) Flatten all ticket ids from df_nested["payload"]
-    tickets = extract_ticket_ids_from_column(df_nested, "payload")
-    print("Tickets (deduped, ordered):", tickets)
-    # -> [101, 102, 103, 104, 105, 106]
-
-    # 2a) Combine by concatenating pulled rows below the initial frame
-    combined_concat = combine_with_ticket_rows(
-        initial_frame=initial_df,
-        ticket_list=tickets,
-        source_df=source_df,
-        ticket_col="ticket_id",
-        how="concat"
+    state_and_external_persistence: UrlStateRequirements = Field(
+        default_factory=UrlStateRequirements,
+        description="External state persistence requirements (URL/storage/etc.)",
     )
-    print("\nRow-wise combined (concat):")
-    print(combined_concat)
 
-    # 2b) (Alternative) Combine by left-joining payload columns onto initial frame
-    combined_join = combine_with_ticket_rows(
-        initial_frame=initial_df,
-        ticket_list=tickets,
-        source_df=source_df,
-        ticket_col="ticket_id",
-        how="left_join",        # choose join mode
-        join_on="ticket_id"     # join key in initial_df
-    )
-    print("\nColumn-wise combined (left_join):")
-    print(combined_join)
+    data_entities: DataEntitiesSection = Field(default_factory=DataEntitiesSection)
+
+    risks: List[RiskItem] = Field(default_factory=list)
+
+    glossary: List[GlossaryItem] = Field(default_factory=list)
+
+    # Optional extension point (kept controlled)
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional structured metadata (avoid prose).")
+```
