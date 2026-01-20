@@ -1,418 +1,340 @@
-init.py
-
 """
-test_design package
+pipeline package
 
-Purpose:
-- Define the static contract for generated Test Cases
-- Provide deterministic transformation: CIR (+ Coverage + Ambiguity) -> TestCases
-- Validate generated TestCases with governance rules
-
-This package does NOT execute tests or generate scripts/data.
+LangGraph orchestration layer:
+- Defines shared State
+- Defines node functions
+- Defines graph wiring
 """
------------
-
-src/test_design/test_case_schema.py
-
-
-
-from __future__ import annotations
-
-from enum import Enum
-from typing import Dict, List, Optional
-
-from pydantic import BaseModel, Field, ConfigDict
-
-
-class TestType(str, Enum):
-    positive = "positive"
-    negative = "negative"
-    edge = "edge"
-    regression = "regression"
-    nfr = "nfr"
-
-
-class Priority(str, Enum):
-    high = "high"
-    medium = "medium"
-    low = "low"
-    tbd = "TBD"
-
-
-class TestStep(BaseModel):
-    """
-    A single test step.
-
-    - action: what to do (user/system)
-    - inputs: structured key/value inputs for determinism (avoid prose blobs)
-    - expected_result: what must be observed after this step
-    """
-    model_config = ConfigDict(extra="forbid")
-
-    action: str = Field(..., min_length=1, description="High-level action.")
-    inputs: Dict[str, str] = Field(default_factory=dict, description="Structured inputs.")
-    expected_result: str = Field(..., min_length=1, description="Expected result after step.")
-
-
-class TestCase(BaseModel):
-    """
-    Canonical Test Case object produced by the system.
-
-    This is intentionally framework-agnostic and stable across stories.
-    """
-    model_config = ConfigDict(extra="forbid")
-
-    test_case_id: str = Field(..., description="Stable ID within a run (e.g., TC-001).")
-    title: str = Field(..., min_length=1)
-    test_type: TestType
-
-    linked_acceptance_criteria: List[str] = Field(
-        default_factory=list,
-        description="Acceptance criteria IDs covered by this test case.",
-    )
-
-    preconditions: List[str] = Field(default_factory=list)
-    steps: List[TestStep] = Field(..., min_length=1)
-    expected_final_outcome: str = Field(..., min_length=1)
-
-    priority: Priority = Field(default=Priority.tbd)
-    notes: List[str] = Field(default_factory=list)
-
-
-class TestCaseSuite(BaseModel):
-    """
-    Container for all test cases produced for a given run_id.
-
-    This is what you'll persist as TestCases.json later.
-    """
-    model_config = ConfigDict(extra="forbid")
-
-    run_id: str = Field(..., min_length=3)
-    test_cases: List[TestCase] = Field(default_factory=list)
 ------------------
 
-src/test_design/validator.py
-
-
+src/pipeline/state.py
 
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Set
-
-from pydantic import BaseModel, Field, ConfigDict
-
-from test_design.test_case_schema import TestCaseSuite, TestCase, TestType
+from typing import Any, Dict, Optional, TypedDict
 
 
-class TestCaseValidationIssue(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    code: str
-    severity: str  # low|medium|high
-    location: str
-    message: str
-    suggested_fix: str = "TBD"
-
-
-class TestCaseValidationReport(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    is_valid: bool
-    errors: List[TestCaseValidationIssue] = Field(default_factory=list)
-    warnings: List[TestCaseValidationIssue] = Field(default_factory=list)
-
-    def add_error(self, issue: TestCaseValidationIssue) -> None:
-        self.errors.append(issue)
-
-    def add_warning(self, issue: TestCaseValidationIssue) -> None:
-        self.warnings.append(issue)
-
-
-@dataclass(frozen=True)
-class TestCaseValidationPolicy:
+class PipelineState(TypedDict, total=False):
     """
-    Governance for test cases.
+    Shared LangGraph state.
 
-    Keep it deterministic and generic:
-    - Link to ACs must exist
-    - IDs must be unique
-    - Steps must not be empty
+    NOTE:
+    - Keep state serializable when possible.
+    - Store large artifacts as dicts/strings (not custom objects) for portability.
     """
-    require_ac_links: bool = True
-    max_steps_per_test: int = 20
-    min_steps_per_test: int = 1
-    allow_empty_preconditions: bool = True
 
+    # Inputs
+    story_id: str
+    story_filename: str
+    story_text: str
 
-DEFAULT_POLICY = TestCaseValidationPolicy()
+    # Prompts (loaded text)
+    prompt_phase1: str
+    prompt_testcases: str
 
+    # LLM handle (non-serializable; ok for local runs)
+    llm: Any
 
-def validate_test_case_suite(
-    suite: TestCaseSuite,
-    known_acceptance_criteria_ids: Set[str],
-    policy: TestCaseValidationPolicy = DEFAULT_POLICY,
-) -> TestCaseValidationReport:
-    report = TestCaseValidationReport(is_valid=True)
+    # Phase-1 outputs
+    run_id: str
+    artifacts: Dict[str, Any]  # filenames -> content (dict for json, str for md)
 
-    # Unique test_case_id
-    seen_ids: Set[str] = set()
-    for i, tc in enumerate(suite.test_cases):
-        loc = f"test_cases[{i}]"
+    # Test case outputs
+    test_cases_obj: Dict[str, Any]  # JSON object {run_id, test_cases:[...]}
 
-        if tc.test_case_id in seen_ids:
-            report.add_error(
-                TestCaseValidationIssue(
-                    code="TC-VAL-001",
-                    severity="high",
-                    location=f"{loc}.test_case_id",
-                    message=f"Duplicate test_case_id: {tc.test_case_id}",
-                    suggested_fix="Ensure TC IDs are unique and sequential within the suite.",
-                )
-            )
-        else:
-            seen_ids.add(tc.test_case_id)
+    # Runtime output path
+    run_dir: str
 
-        # Must have steps
-        if len(tc.steps) < policy.min_steps_per_test:
-            report.add_error(
-                TestCaseValidationIssue(
-                    code="TC-VAL-002",
-                    severity="high",
-                    location=f"{loc}.steps",
-                    message="Test case must contain at least one step.",
-                    suggested_fix="Add at least one actionable step with expected result.",
-                )
-            )
-
-        if len(tc.steps) > policy.max_steps_per_test:
-            report.add_warning(
-                TestCaseValidationIssue(
-                    code="TC-VAL-003",
-                    severity="medium",
-                    location=f"{loc}.steps",
-                    message=f"Test case has many steps ({len(tc.steps)}). May be too verbose.",
-                    suggested_fix="Consider splitting into smaller tests if steps represent distinct behaviors.",
-                )
-            )
-
-        # AC link checks
-        if policy.require_ac_links:
-            if not tc.linked_acceptance_criteria:
-                report.add_error(
-                    TestCaseValidationIssue(
-                        code="TC-VAL-004",
-                        severity="high",
-                        location=f"{loc}.linked_acceptance_criteria",
-                        message="Test case must link to at least one acceptance criterion.",
-                        suggested_fix="Link the test to at least one AC ID from the CIR.",
-                    )
-                )
-            else:
-                unknown = [ac for ac in tc.linked_acceptance_criteria if ac not in known_acceptance_criteria_ids]
-                if unknown:
-                    report.add_error(
-                        TestCaseValidationIssue(
-                            code="TC-VAL-005",
-                            severity="high",
-                            location=f"{loc}.linked_acceptance_criteria",
-                            message=f"Test case links to unknown AC IDs: {unknown}",
-                            suggested_fix="Use only AC IDs present in the CIR functional_requirements.",
-                        )
-                    )
-
-        # NFR tests should link to some AC or be explicitly justified
-        if tc.test_type == TestType.nfr and not tc.notes:
-            report.add_warning(
-                TestCaseValidationIssue(
-                    code="TC-VAL-006",
-                    severity="low",
-                    location=f"{loc}.notes",
-                    message="NFR test case has no notes; rationale may be unclear.",
-                    suggested_fix="Add a short note describing why this NFR test is needed and how it will be validated.",
-                )
-            )
-
-    if report.errors:
-        report.is_valid = False
-    return report
+    # Diagnostics
+    warnings: list[str]
 
 
 
+-------------
 
 
------------------------
+src/pipeline/nodes.py
 
-
-src/test_design/designer.py
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from typing import Optional, Set, List, Protocol
+from pathlib import Path
+from typing import Any, Dict
 
-from pydantic import ValidationError as PydanticValidationError
+from pipeline.state import PipelineState
 
-from contracts.cir_schema import CanonicalUserStoryCIR
-from contracts.validation_spec import validate_cir
-from test_design.test_case_schema import TestCaseSuite, TestCase
-from test_design.validator import validate_test_case_suite, TestCaseValidationPolicy, DEFAULT_POLICY
+from phase1.parser import parse_phase1_output
+from phase1.writer import write_artifacts_to_run_dir
+from phase1.models import ArtifactBundle
+
+from test_design.designer import design_test_cases, TestCaseDesignConfig
 
 
-class LLMClient(Protocol):
+def _render_prompt_with_story(prompt_template: str, story_text: str) -> str:
     """
-    Minimal interface you can implement later with OpenAI / Azure / Gemini etc.
+    Your Phase-1 prompt uses:
+    NOW PROCESS THIS USER STORY:
+    """<USER_STORY_TEXT>"""
+
+    We replace the placeholder safely.
     """
-    def generate(self, prompt: str) -> str: ...
+    return prompt_template.replace('"""<USER_STORY_TEXT>"""', f'"""{story_text}"""')
 
 
-@dataclass(frozen=True)
-class TestCaseDesignConfig:
+def node_phase1_generate(state: PipelineState) -> PipelineState:
     """
-    Configuration for test case design step.
+    Calls LLM for Phase-1 artifacts generation, parses the output into an ArtifactBundle.
     """
-    use_llm: bool = False
-    temperature_hint: float = 0.1
-    policy: TestCaseValidationPolicy = DEFAULT_POLICY
+    llm = state["llm"]
+    prompt_phase1 = state["prompt_phase1"]
+    story_text = state["story_text"]
+
+    prompt = _render_prompt_with_story(prompt_phase1, story_text)
+
+    # Azure OpenAI usage pattern (as you described)
+    # llm.invoke("...") -> returns text or object with content
+    raw_out = llm.invoke(prompt)
+
+    # Normalize output to string
+    if isinstance(raw_out, str):
+        out_text = raw_out
+    else:
+        # common patterns: .content or str(obj)
+        out_text = getattr(raw_out, "content", None) or str(raw_out)
+
+    parse_result = parse_phase1_output(out_text)
+
+    bundle: ArtifactBundle = parse_result.bundle
+    warnings = parse_result.warnings or []
+
+    state["run_id"] = bundle.run_id
+    state["artifacts"] = bundle.artifacts
+    state["warnings"] = warnings
+    return state
 
 
-class TestCaseDesignError(Exception):
-    pass
-
-
-def design_test_cases(
-    cir: CanonicalUserStoryCIR,
-    coverage_intent: dict,
-    ambiguity_report: Optional[dict] = None,
-    llm_client: Optional[LLMClient] = None,
-    prompt_template: Optional[str] = None,
-    config: TestCaseDesignConfig = TestCaseDesignConfig(),
-) -> TestCaseSuite:
+def node_phase1_write_runtime(state: PipelineState) -> PipelineState:
     """
-    Deterministic boundary: CIR (+ Coverage + Ambiguity) -> TestCaseSuite
-
-    - Validates CIR first (hard gate)
-    - If config.use_llm is False, returns an empty suite (placeholder)
-    - If config.use_llm is True, calls the LLM and parses JSON into TestCaseSuite
-    - Validates test cases against governance rules (hard gate)
+    Writes Phase-1 artifacts to runtime/runs/<run_id>/...
     """
-    # 1) CIR governance validation
-    cir_report = validate_cir(cir)
-    if not cir_report.is_valid:
-        raise TestCaseDesignError(
-            "CIR validation failed; cannot design test cases. "
-            f"Errors: {[e.model_dump() for e in cir_report.errors]}"
-        )
+    run_id = state["run_id"]
+    artifacts = state["artifacts"]
 
-    # Derive known AC IDs for downstream validation
-    known_ac_ids: Set[str] = set()
-    for ac in cir.functional_requirements:
-        if ac.ac_id:
-            known_ac_ids.add(ac.ac_id)
+    bundle = ArtifactBundle(run_id=run_id, artifacts=artifacts)
 
-    # 2) Placeholder mode (no LLM yet)
-    if not config.use_llm:
-        suite = TestCaseSuite(run_id=cir.run_id, test_cases=[])
-        return suite
+    runtime_root = Path("./runtime").resolve()
+    run_dir = write_artifacts_to_run_dir(bundle=bundle, runtime_root=runtime_root, overwrite=False)
 
-    # 3) LLM mode
-    if llm_client is None:
-        raise TestCaseDesignError("LLM mode enabled but llm_client is None.")
-    if not prompt_template:
-        raise TestCaseDesignError("LLM mode enabled but prompt_template is None.")
+    state["run_dir"] = str(run_dir)
+    return state
 
-    prompt = _render_test_case_prompt(
-        prompt_template=prompt_template,
+
+def node_generate_test_cases(state: PipelineState) -> PipelineState:
+    """
+    Uses CIR + Coverage (and Ambiguity if present) to generate TestCases.json (via LLM).
+    """
+    llm = state["llm"]
+    prompt_template = state["prompt_testcases"]
+    artifacts = state["artifacts"]
+
+    cir_dict = artifacts["CanonicalUserStoryCIR.json"]
+    coverage_dict = artifacts["CoverageIntent.json"]
+    ambiguity_dict = artifacts.get("AmbiguityReport.json")  # optional, but usually present
+
+    # Build CanonicalUserStoryCIR Pydantic model (so we validate shape early)
+    from contracts.cir_schema import CanonicalUserStoryCIR
+    cir = CanonicalUserStoryCIR(**cir_dict)
+
+    # Minimal LLM adapter expected by designer.py
+    class _LLMAdapter:
+        def __init__(self, inner: Any):
+            self.inner = inner
+
+        def generate(self, prompt: str) -> str:
+            resp = self.inner.invoke(prompt)
+            if isinstance(resp, str):
+                return resp
+            return getattr(resp, "content", None) or str(resp)
+
+    suite = design_test_cases(
         cir=cir,
-        coverage_intent=coverage_intent,
-        ambiguity_report=ambiguity_report,
+        coverage_intent=coverage_dict,
+        ambiguity_report=ambiguity_dict,
+        llm_client=_LLMAdapter(llm),
+        prompt_template=prompt_template,
+        config=TestCaseDesignConfig(use_llm=True, temperature_hint=0.1),
     )
 
-    raw = llm_client.generate(prompt)
-    suite = _parse_test_case_output(raw, expected_run_id=cir.run_id)
-
-    # 4) Governance validation for test cases
-    tc_report = validate_test_case_suite(suite, known_acceptance_criteria_ids=known_ac_ids, policy=config.policy)
-    if not tc_report.is_valid:
-        raise TestCaseDesignError(
-            "Generated test cases failed validation. "
-            f"Errors: {[e.model_dump() for e in tc_report.errors]}"
-        )
-
-    return suite
+    # Store as plain JSON object for writing
+    state["test_cases_obj"] = suite.model_dump()
+    return state
 
 
-def _render_test_case_prompt(
-    prompt_template: str,
-    cir: CanonicalUserStoryCIR,
-    coverage_intent: dict,
-    ambiguity_report: Optional[dict],
-) -> str:
+def node_write_test_cases(state: PipelineState) -> PipelineState:
     """
-    Render the prompt by appending inputs in a consistent way.
-
-    We keep it simple: template + appended JSON blocks.
-    This avoids brittle string placeholder substitution.
+    Writes TestCases.json into the same runtime run folder.
     """
-    parts: List[str] = [prompt_template.strip(), "", "NOW GENERATE TEST CASES USING THESE INPUTS:"]
-    parts.append("#### File name : CanonicalUserStoryCIR.json")
-    parts.append(json.dumps(cir.model_dump(), indent=2, sort_keys=True, ensure_ascii=False))
-    parts.append("")
-    parts.append("#### File name : CoverageIntent.json")
-    parts.append(json.dumps(coverage_intent, indent=2, sort_keys=True, ensure_ascii=False))
+    run_dir = Path(state["run_dir"]).resolve()
+    out_path = run_dir / "TestCases.json"
 
-    if ambiguity_report is not None:
-        parts.append("")
-        parts.append("#### File name : AmbiguityReport.json")
-        parts.append(json.dumps(ambiguity_report, indent=2, sort_keys=True, ensure_ascii=False))
+    obj = state["test_cases_obj"]
+    text = json.dumps(obj, indent=2, ensure_ascii=False, sort_keys=True)
+    out_path.write_text(text + "\n", encoding="utf-8")
 
-    return "\n".join(parts).strip() + "\n"
+    # Also update RunManifest inventory (optional but useful)
+    manifest_path = run_dir / "RunManifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            inv = manifest.get("file_inventory", [])
+            if "TestCases.json" not in inv:
+                inv.append("TestCases.json")
+                manifest["file_inventory"] = sorted(inv)
+                manifest_path.write_text(
+                    json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+        except Exception:
+            # Don't fail run on manifest update; keep deterministic core flow
+            pass
+
+    return state
+-----
+
+src/pipeline/graph.py
+from __future__ import annotations
+
+from langgraph.graph import StateGraph, END
+
+from pipeline.state import PipelineState
+from pipeline.nodes import (
+    node_phase1_generate,
+    node_phase1_write_runtime,
+    node_generate_test_cases,
+    node_write_test_cases,
+)
 
 
-def _parse_test_case_output(raw_text: str, expected_run_id: str) -> TestCaseSuite:
+def build_graph() -> StateGraph:
     """
-    Expects strict JSON output:
-    { "run_id": "...", "test_cases": [ ... ] }
-
-    Raises TestCaseDesignError on any parse/validation failure.
+    Minimal linear graph:
+    Story -> Phase1 LLM -> parse -> write -> Testcases LLM -> write -> END
     """
-    s = raw_text.strip()
-    try:
-        obj = json.loads(s)
-    except json.JSONDecodeError as e:
-        raise TestCaseDesignError(f"Invalid JSON returned by LLM: {e}") from e
+    g = StateGraph(PipelineState)
 
-    if not isinstance(obj, dict):
-        raise TestCaseDesignError("LLM output must be a JSON object.")
+    g.add_node("phase1_generate", node_phase1_generate)
+    g.add_node("phase1_write_runtime", node_phase1_write_runtime)
+    g.add_node("generate_test_cases", node_generate_test_cases)
+    g.add_node("write_test_cases", node_write_test_cases)
 
-    if obj.get("run_id") != expected_run_id:
-        raise TestCaseDesignError(
-            f"run_id mismatch: expected {expected_run_id}, got {obj.get('run_id')}"
-        )
+    g.set_entry_point("phase1_generate")
+    g.add_edge("phase1_generate", "phase1_write_runtime")
+    g.add_edge("phase1_write_runtime", "generate_test_cases")
+    g.add_edge("generate_test_cases", "write_test_cases")
+    g.add_edge("write_test_cases", END)
 
-    # Validate against Pydantic schema
-    try:
-        suite = TestCaseSuite(**obj)
-    except PydanticValidationError as e:
-        raise TestCaseDesignError(f"TestCaseSuite schema validation failed: {e}") from e
-
-    # Ensure TC IDs exist; if not, we can auto-assign deterministically (optional)
-    _ensure_tc_ids(suite)
-    return suite
+    return g
+----
 
 
-def _ensure_tc_ids(suite: TestCaseSuite) -> None:
-    """
-    Deterministically assign missing TC IDs as TC-001, TC-002, ...
-    (Mutates the suite in-memory; persistence will write the final state.)
-    """
-    changed = False
-    for idx, tc in enumerate(suite.test_cases, start=1):
-        if not tc.test_case_id or not tc.test_case_id.strip():
-            # Pydantic models are mutable by default; safe to set
-            tc.test_case_id = f"TC-{idx:03d}"  # type: ignore[attr-defined]
-            changed = True
+src/main.py
+from __future__ import annotations
 
-    # If your team prefers immutability, we can refactor to rebuild models instead.
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+from ingestion.story_loader import load_user_stories
+from pipeline.graph import build_graph
+
+
+def _read_prompt_file(path: str | Path) -> str:
+    p = Path(path).expanduser().resolve()
+    if not p.exists():
+        raise FileNotFoundError(f"Prompt file not found: {p}")
+    return p.read_text(encoding="utf-8").strip() + "\n"
+
+
+def main() -> None:
+    load_dotenv()
+
+    story_dir = os.getenv("USER_STORY_DIR", "./user_story")
+    runtime_root = os.getenv("RUNTIME_ROOT", "./runtime")
+
+    # Prompts (you said you stored these as .txt files under src/prompts/)
+    prompt_phase1_path = os.getenv("PROMPT_PHASE1_PATH", "./src/prompts/phase1_runtime_artifacts.prompt.txt")
+    prompt_testcases_path = os.getenv("PROMPT_TESTCASES_PATH", "./src/prompts/test_case_generation.prompt.txt")
+
+    prompt_phase1 = _read_prompt_file(prompt_phase1_path)
+    prompt_testcases = _read_prompt_file(prompt_testcases_path)
+
+    # Load stories from directory (temporary local ingestion)
+    stories = load_user_stories(story_dir)
+    if not stories:
+        raise SystemExit(f"No user stories found in: {story_dir}")
+
+    # Pick the first story deterministically for now
+    story = stories[0]
+    print(f"[main] Selected story: {story.filename}")
+
+    # ---- Azure OpenAI LLM ----
+    # You said you already have: llm = get_llm(token)
+    # and can do: llm.invoke("what is prime number")
+    #
+    # IMPORTANT: Update this import path to wherever your get_llm(token) lives.
+    #
+    # Example token env var names — adjust to your setup:
+    token = os.getenv("AZURE_OPENAI_TOKEN") or os.getenv("AZURE_OPENAI_API_KEY") or ""
+    if not token:
+        print("[main] WARNING: AZURE_OPENAI_TOKEN/AZURE_OPENAI_API_KEY is empty. LLM calls will fail.")
+
+    # CHANGE THIS IMPORT TO YOUR ACTUAL MODULE PATH:
+    from your_azure_module import get_llm  # <-- TODO: replace
+
+    llm = get_llm(token)
+
+    # Build + run graph
+    graph = build_graph().compile()
+
+    initial_state = {
+        "story_id": story.story_id,
+        "story_filename": story.filename,
+        "story_text": story.raw_text,
+        "prompt_phase1": prompt_phase1,
+        "prompt_testcases": prompt_testcases,
+        "llm": llm,
+        "warnings": [],
+    }
+
+    # Ensure runtime root exists
+    Path(runtime_root).mkdir(parents=True, exist_ok=True)
+
+    final_state = graph.invoke(initial_state)
+
+    print(f"[main] run_id: {final_state.get('run_id')}")
+    print(f"[main] run_dir: {final_state.get('run_dir')}")
+    if final_state.get("warnings"):
+        print("[main] warnings:")
+        for w in final_state["warnings"]:
+            print(f"  - {w}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+------
+
+.env
+
+PROMPT_PHASE1_PATH=./src/prompts/phase1_runtime_artifacts.prompt.txt
+PROMPT_TESTCASES_PATH=./src/prompts/test_case_generation.prompt.txt
+AZURE_OPENAI_TOKEN=...
+USER_STORY_DIR=./user_story
+RUNTIME_ROOT=./runtime
