@@ -1,195 +1,136 @@
-```python
-def normalize_cir_dict(cir_dict: dict) -> dict:
-    """
-    Normalize Phase-1 CanonicalUserStoryCIR.json (LLM/prompt output)
-    into the internal Pydantic schema shape expected by contracts/cir_schema.py.
+ROLE:
+You are “QA Architect + Test Automation Lead + Data Quality Engineer”.
+Convert a single User Story into strict, machine-validated per-run artifacts for an agentic test-suite designer pipeline.
 
-    Why this exists:
-    - LLM outputs vary (keys, nesting, list vs string)
-    - We keep internal contracts strict and stable
-    - This function is the single compatibility adapter layer
+NON-NEGOTIABLE RULES:
+1) Determinism: Do not invent requirements. If unclear, record it in AmbiguityReport.json and use explicit placeholders (TBD/UNKNOWN) in CIR.
+2) No internet access and no external knowledge assumptions.
+3) Output MUST be a single valid JSON object (no markdown, no extra text, no code fences).
+4) JSON must be strictly structured. Avoid free-form prose except in designated list fields like notes arrays.
+5) Always produce ALL artifacts listed under “Artifacts”.
+6) Do NOT regenerate static contracts. Assume CIR schema is CONTRACT-v1.0. Output MUST conform to that schema exactly.
 
-    What it guarantees (stable invariants):
-    - story_metadata has story_id, story_points, owners (list)
-    - functional_requirements is a LIST of AC objects (not wrapped)
-    - each AC has a deterministic ac_id (AC-1, AC-2, ...) if missing
-    - AC notes / traceability_tags are LIST[str]
-    - nfrs[*].testability_notes is LIST[str]
-    - state_and_url_requirements is mapped to state_and_external_persistence
-    """
-    import json
+INPUT:
+You will receive exactly one user story in the form:
+"""<USER_STORY_TEXT>"""
 
-    out = dict(cir_dict or {})
+ARTIFACTS (must produce all):
+1) RawUserStory.json
+2) AmbiguityReport.json
+3) CanonicalUserStoryCIR.json
+4) CoverageIntent.json
+5) RunManifest.json
+6) ContractDeltaSuggestions.md  (suggestions ONLY; do not change contracts)
 
-    # ----------------------------
-    # story_metadata mapping
-    # ----------------------------
-    sm = dict(out.get("story_metadata", {}) or {})
+OUTPUT FORMAT (STRICT JSON ENVELOPE):
+Return ONE JSON object with this shape:
 
-    # story_id
-    if "story_id" not in sm or not str(sm.get("story_id", "")).strip():
-        sm["story_id"] = sm.get("id_if_any") or sm.get("id") or "UNKNOWN"
+{
+  "run_id": "<deterministic_run_id>",
+  "artifacts": {
+    "RawUserStory.json": { ... },
+    "AmbiguityReport.json": { ... },
+    "CanonicalUserStoryCIR.json": { ... MUST MATCH CONTRACT-v1.0 ... },
+    "CoverageIntent.json": { ... },
+    "RunManifest.json": { ... },
+    "ContractDeltaSuggestions.md": "<markdown string>"
+  }
+}
 
-    # story_points (schema) from points (prompt)
-    if "story_points" not in sm and "points" in sm:
-        sm["story_points"] = sm["points"]
+RUN_ID RULE:
+Deterministic run_id = "RUN-" + YYYYMMDD + "-" + short_hash_of_story_name
+(short_hash 6-10 lowercase alphanumerics derived from story name; stable for same story.)
 
-    # owners list
-    if "owners" not in sm:
-        if "owner" in sm and sm["owner"]:
-            sm["owners"] = [str(sm["owner"])]
-        else:
-            sm["owners"] = []
+IMPORTANT TYPE RULES (STRICT):
+- Any field defined as List[str] MUST be a JSON array of strings, never a single string.
+- If you have only one item, still wrap it as a one-element array.
+- For missing values, use [] or ["TBD"] depending on meaning.
+- Do not output unknown keys (schema forbids extras).
 
-    # remove prompt-only keys that strict schema may forbid
-    sm.pop("id_if_any", None)
-    sm.pop("points", None)
-    sm.pop("owner", None)
+--------------------------------------------
+(3) CanonicalUserStoryCIR.json MUST MATCH THIS EXACT SHAPE (CONTRACT-v1.0)
+--------------------------------------------
 
-    out["story_metadata"] = sm
+CanonicalUserStoryCIR.json must include EXACTLY these top-level fields:
+{
+  "contract_version": "CONTRACT-v1.0",
+  "run_id": "<same run_id>",
+  "story_metadata": {
+    "story_id": "<string, required>",
+    "name": "<string, required>",
+    "state": "<string, default UNKNOWN if missing>",
+    "owners": ["<string>", "..."],
+    "tags": ["<string>", "..."],
+    "priority": "Low|Medium|High|Critical|UNKNOWN",
+    "story_points": <int or null>,
+    "iteration": "<string>",
+    "release": "<string>"
+  },
+  "objective": { "actor": "<string>", "goal": "<string>", "benefit": "<string>" },
+  "scope": {
+    "in_scope": ["..."],
+    "out_of_scope": ["..."],
+    "assumptions": ["..."],
+    "dependencies": ["..."]
+  },
 
-    # ----------------------------
-    # functional_requirements extraction (robust)
-    # ----------------------------
-    def _extract_acceptance_criteria(obj: dict) -> list:
-        fr = obj.get("functional_requirements")
+  "functional_requirements": [
+    {
+      "ac_id": "AC-1",
+      "description": "<short>",
+      "preconditions": ["..."],
+      "triggers": ["..."],
+      "expected_outcome": ["..."],
+      "notes": ["..."],
+      "traceability_tags": ["..."]
+    }
+  ],
 
-        # Case 1: already a list
-        if isinstance(fr, list):
-            return fr
+  "nfrs": [
+    {
+      "category": "<string>",
+      "requirement": "<string>",
+      "measurement_or_threshold_if_any": "<string>",
+      "testability_notes": ["..."]
+    }
+  ],
 
-        # Case 2: wrapper dict
-        if isinstance(fr, dict):
-            for key in ("acceptance_criteria", "criteria", "acs", "items"):
-                v = fr.get(key)
-                if isinstance(v, list):
-                    return v
-                if isinstance(v, dict):
-                    # Sometimes LLM emits {"AC-1": {...}, "AC-2": {...}}
-                    return list(v.values())
+  "state_and_external_persistence": {
+    "externalized_state_required": <true|false>,
+    "mechanism": "<string e.g. URL parameters / cookies / storage / TBD>",
+    "rules": ["..."]
+  },
 
-        # Case 3: top-level fallback keys
-        for key in ("acceptance_criteria", "acceptanceCriteria"):
-            v = obj.get(key)
-            if isinstance(v, list):
-                return v
+  "data_entities": {
+    "entities": [
+      { "name": "<string>", "attributes": ["..."], "constraints": ["..."], "source": "<string>" }
+    ],
+    "unknowns": ["..."]
+  },
 
-        return []
+  "risks": [ { "risk": "<string>", "mitigation_test_idea": "<string>" } ],
+  "glossary": [ { "term": "<string>", "meaning_or_TBD": "<string>" } ],
+  "metadata": { }
+}
 
-    out["functional_requirements"] = _extract_acceptance_criteria(out)
+ABSOLUTE REQUIREMENTS:
+- functional_requirements MUST be a non-empty array if the story has any acceptance criteria at all.
+- Every AC MUST have ac_id. Use AC-1, AC-2, ... deterministically.
+- expected_outcome MUST be a LIST of strings (even if single).
+- preconditions and triggers MUST be LIST of strings (even if single).
+- notes and traceability_tags MUST be LIST of strings.
 
-    # ----------------------------
-    # Normalize each AC object:
-    # - ensure ac_id exists deterministically
-    # - notes and traceability_tags are List[str]
-    # ----------------------------
-    fr_list = out.get("functional_requirements") or []
-    fixed_fr: list = []
+--------------------------------------------
+Other artifact requirements remain as you already defined (RawUserStory, AmbiguityReport, CoverageIntent, RunManifest, ContractDeltaSuggestions).
+--------------------------------------------
 
-    if isinstance(fr_list, list):
-        for idx, ac in enumerate(fr_list, start=1):
-            if not isinstance(ac, dict):
-                continue
-            ac2 = dict(ac)
+NOW PROCESS THIS USER STORY:
+"""<USER_STORY_TEXT>"""
+ ------------------------
 
-            # Ensure ac_id exists
-            ac_id = ac2.get("ac_id")
-            if not isinstance(ac_id, str) or not ac_id.strip():
-                # allow alternate keys
-                alt = ac2.get("id") or ac2.get("acId") or ac2.get("acceptance_criteria_id")
-                if isinstance(alt, str) and alt.strip():
-                    ac2["ac_id"] = alt.strip()
-                else:
-                    ac2["ac_id"] = f"AC-{idx}"
+2) linked_acceptance_criteria MUST contain ONLY ac_id values exactly as present in CIR.functional_requirements[].ac_id.
+7) Step.inputs values may be nested JSON objects/arrays (must remain JSON-serializable).
 
-            # notes -> List[str]
-            n = ac2.get("notes")
-            if isinstance(n, str):
-                n_str = n.strip()
-                ac2["notes"] = [] if n_str == "" else [n_str]
-            elif n is None:
-                ac2["notes"] = []
-            elif isinstance(n, list):
-                ac2["notes"] = [str(x).strip() for x in n if str(x).strip()]
-            else:
-                ac2["notes"] = [str(n).strip()] if str(n).strip() else []
 
-            # traceability_tags -> List[str]
-            tt = ac2.get("traceability_tags")
-            if isinstance(tt, str):
-                tt_str = tt.strip()
-                ac2["traceability_tags"] = [] if tt_str == "" else [tt_str]
-            elif tt is None:
-                ac2["traceability_tags"] = []
-            elif isinstance(tt, list):
-                ac2["traceability_tags"] = [str(x).strip() for x in tt if str(x).strip()]
-            else:
-                ac2["traceability_tags"] = [str(tt).strip()] if str(tt).strip() else []
 
-            # common coercions: preconditions/triggers/expected_outcome may appear as strings
-            for k in ("preconditions", "triggers"):
-                v = ac2.get(k)
-                if isinstance(v, str):
-                    v_str = v.strip()
-                    ac2[k] = [] if v_str == "" else [v_str]
-                elif v is None:
-                    ac2[k] = []
-                elif isinstance(v, list):
-                    ac2[k] = [str(x).strip() for x in v if str(x).strip()]
-                else:
-                    ac2[k] = [str(v).strip()] if str(v).strip() else []
-
-            # expected_outcome should generally be a string; if list/dict, stringify deterministically
-            eo = ac2.get("expected_outcome")
-            if isinstance(eo, list) or isinstance(eo, dict):
-                ac2["expected_outcome"] = json.dumps(eo, ensure_ascii=False, sort_keys=True)
-            elif eo is None:
-                ac2["expected_outcome"] = "TBD"
-
-            fixed_fr.append(ac2)
-
-    out["functional_requirements"] = fixed_fr
-
-    # ----------------------------
-    # nfrs normalization: testability_notes -> List[str]
-    # ----------------------------
-    nfrs = out.get("nfrs") or []
-    fixed_nfrs: list = []
-    if isinstance(nfrs, list):
-        for n in nfrs:
-            if not isinstance(n, dict):
-                continue
-            n2 = dict(n)
-            tn = n2.get("testability_notes")
-            if isinstance(tn, str):
-                tn_str = tn.strip()
-                n2["testability_notes"] = [] if tn_str == "" else [tn_str]
-            elif tn is None:
-                n2["testability_notes"] = []
-            elif isinstance(tn, list):
-                n2["testability_notes"] = [str(x).strip() for x in tn if str(x).strip()]
-            else:
-                n2["testability_notes"] = [str(tn).strip()] if str(tn).strip() else []
-            fixed_nfrs.append(n2)
-    out["nfrs"] = fixed_nfrs
-
-    # ----------------------------
-    # state/url requirements mapping
-    # prompt: state_and_url_requirements -> schema: state_and_external_persistence
-    # ----------------------------
-    if "state_and_url_requirements" in out and "state_and_external_persistence" not in out:
-        sur = out.get("state_and_url_requirements") or {}
-        out["state_and_external_persistence"] = {
-            "externalized_state_required": bool(sur.get("url_parameterization_required", False)),
-            "mechanism": "url_parameters",
-            "rules": sur.get("url_rules") or [],
-        }
-        out.pop("state_and_url_requirements", None)
-
-    # ----------------------------
-    # Final cleanup of known prompt-only stray keys
-    # ----------------------------
-    out.pop("id_if_any", None)
-
-    return out
-```
+                              
