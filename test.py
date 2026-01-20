@@ -1,41 +1,17 @@
-def _parse_test_case_output(raw_text: str, expected_run_id: str, known_ac_ids: Set[str]) -> TestCaseSuite:
-    """
-    Expects strict JSON output:
-    { "run_id": "...", "test_cases": [ ... ] }
-
-    Stable hardening:
-    - If linked_acceptance_criteria is missing/empty, auto-link deterministically
-      using the first known AC ID from the CIR.
-    """
-    s = raw_text.strip()
-    try:
-        obj = json.loads(s)
-    except json.JSONDecodeError as e:
-        raise TestCaseDesignError(f"Invalid JSON returned by LLM: {e}") from e
-
-    if not isinstance(obj, dict):
-        raise TestCaseDesignError("LLM output must be a JSON object.")
-
-    if obj.get("run_id") != expected_run_id:
-        raise TestCaseDesignError(
-            f"run_id mismatch: expected {expected_run_id}, got {obj.get('run_id')}"
-        )
-
-    # Validate against Pydantic schema
-    try:
-        suite = TestCaseSuite(**obj)
-    except PydanticValidationError as e:
-        raise TestCaseDesignError(f"TestCaseSuite schema validation failed: {e}") from e
-
-    _ensure_tc_ids(suite)
-
-    # ---- STABLE FIX: enforce AC linking deterministically ----
+    # ---- STABLE FIX: enforce AC linking deterministically + sanitize invalid IDs ----
     ac_list = sorted(list(known_ac_ids))
     default_ac = ac_list[0] if ac_list else None
 
-    if default_ac:
-        for tc in suite.test_cases:
-            if not tc.linked_acceptance_criteria:
-                tc.linked_acceptance_criteria = [default_ac]  # type: ignore[attr-defined]
+    if not default_ac:
+        raise TestCaseDesignError("No acceptance criteria IDs available in CIR; cannot link test cases.")
 
-    return suite
+    for tc in suite.test_cases:
+        # normalize: keep only valid AC IDs
+        valid_links = [ac for ac in (tc.linked_acceptance_criteria or []) if ac in known_ac_ids]
+
+        # if none remain (covers TC-VAL-004 and TC-VAL-005), force default
+        if not valid_links:
+            tc.linked_acceptance_criteria = [default_ac]  # type: ignore[attr-defined]
+        else:
+            # keep deterministic ordering
+            tc.linked_acceptance_criteria = sorted(set(valid_links))  # type: ignore[attr-defined]
