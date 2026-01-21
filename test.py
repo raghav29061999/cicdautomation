@@ -1,112 +1,150 @@
-# src/test_data_design/test_data_schema.py
+# src/main.py
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import json
+import os
+from pathlib import Path
+import tempfile
 
-from pydantic import BaseModel, ConfigDict, Field, AliasChoices
+import streamlit as st
+from dotenv import load_dotenv
 
-
-DATA_CONTRACT_VERSION = "TD-v1.0"
-
-
-# -----------------------------
-# Core components
-# -----------------------------
-
-class DataEntity(BaseModel):
-    """
-    Logical data entity used across datasets.
-    """
-    model_config = ConfigDict(extra="forbid")
-
-    entity_name: str
-    description: str
-    key_fields: List[str] = Field(default_factory=list)
-
-    # records are intentionally flexible but must remain JSON-serializable
-    records: List[Dict[str, Any]] = Field(default_factory=list)
+from src.pipeline.graph import build_graph
+from src.utils import _read_prompt_file, get_access_token, get_llm
 
 
-class DataSlice(BaseModel):
-    """
-    Subset of data with selectors defining how to pick records / interpret the slice.
-    IMPORTANT: selectors MUST be a free-form dict and may contain arbitrary keys.
-    """
-    model_config = ConfigDict(extra="forbid")
+# ------------------------
+# Streamlit App
+# ------------------------
 
-    slice_id: str
-    description: str
+def main():
+    load_dotenv()
 
-    # FREE-FORM dict. This is the key fix for your error.
-    selectors: Dict[str, Any] = Field(default_factory=dict)
-
-    expected_behavior_notes: List[str] = Field(default_factory=list)
-
-
-class Dataset(BaseModel):
-    """
-    Dataset designed to support one or more test cases.
-    """
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
-
-    dataset_id: str
-    purpose: str
-
-    linked_acceptance_criteria: List[str] = Field(default_factory=list)
-
-    # Accept both variants from LLM output (robustness)
-    linked_test_cases: List[str] = Field(
-        default_factory=list,
-        validation_alias=AliasChoices("linked_test_cases", "linked_test_case"),
+    st.set_page_config(
+        page_title="Agentic Test Design",
+        layout="wide"
     )
 
-    entity_refs: List[str] = Field(default_factory=list)
+    st.title("🧠 Agentic Test Design Pipeline")
+    st.caption("Upload a user story → get TestCases.json + TestData.json")
 
-    # flexible structure (we don't want schema churn here)
-    data_profile: Dict[str, Any] = Field(default_factory=dict)
-
-    data_slices: List[DataSlice] = Field(default_factory=list)
-
-
-class NegativeOrEdgeData(BaseModel):
-    """
-    Invalid or edge-condition data for negative testing.
-    """
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
-
-    case_id: str
-
-    linked_acceptance_criteria: List[str] = Field(default_factory=list)
-
-    linked_test_cases: List[str] = Field(
-        default_factory=list,
-        validation_alias=AliasChoices("linked_test_cases", "linked_test_case"),
+    # ------------------------
+    # Upload User Story
+    # ------------------------
+    uploaded_file = st.file_uploader(
+        "Upload User Story (.txt)",
+        type=["txt"]
     )
 
-    description: str
+    if not uploaded_file:
+        st.info("Please upload a user story text file to begin.")
+        return
 
-    invalid_records: List[Dict[str, Any]] = Field(default_factory=list)
+    story_text = uploaded_file.read().decode("utf-8")
 
-    expected_validation_or_handling: List[str] = Field(default_factory=list)
+    st.subheader("📄 User Story Preview")
+    st.text_area(
+        label="User Story",
+        value=story_text,
+        height=200
+    )
+
+    # ------------------------
+    # Run Pipeline Button
+    # ------------------------
+    if st.button("🚀 Generate Test Artifacts", type="primary"):
+        with st.spinner("Running agentic pipeline..."):
+            try:
+                run_pipeline(story_text)
+            except Exception as e:
+                st.error("Pipeline execution failed")
+                st.exception(e)
+                return
+
+    # ------------------------
+    # Show Outputs
+    # ------------------------
+    runtime_root = Path(os.getenv("RUNTIME_ROOT", "./runtime"))
+    runs_dir = runtime_root / "runs"
+
+    if runs_dir.exists():
+        latest_run = sorted(runs_dir.iterdir(), key=os.path.getmtime)[-1]
+
+        st.success(f"✅ Run completed: {latest_run.name}")
+
+        show_outputs(latest_run)
 
 
-class TestDataSuite(BaseModel):
-    """
-    Top-level TestData.json container.
-    """
-    model_config = ConfigDict(extra="forbid")
+# ------------------------
+# Pipeline Runner
+# ------------------------
 
-    run_id: str
-    data_version: str = Field(default=DATA_CONTRACT_VERSION)
+def run_pipeline(story_text: str):
+    # Load prompts
+    prompt_phase1 = _read_prompt_file(
+        os.getenv("PROMPT_PHASE1_PATH", "./src/prompts/phase1_runtime_artifacts.txt")
+    )
+    prompt_testcases = _read_prompt_file(
+        os.getenv("PROMPT_TESTCASES_PATH", "./src/prompts/test_case_generation.txt")
+    )
+    prompt_testdata = _read_prompt_file(
+        os.getenv("PROMPT_TESTDATA_PATH", "./src/prompts/test_data_generation.txt")
+    )
 
-    generation_intent: Dict[str, Any] = Field(default_factory=dict)
+    # LLM
+    access_token = get_access_token()
+    llm = get_llm(access_token)
 
-    entities: List[DataEntity] = Field(default_factory=list)
-    datasets: List[Dataset] = Field(default_factory=list)
-    negative_and_edge_data: List[NegativeOrEdgeData] = Field(default_factory=list)
+    # Build graph
+    graph = build_graph().compile()
 
-    assumptions_and_limits: List[str] = Field(default_factory=list)
+    initial_state = {
+        "story_text": story_text,
+        "prompt_phase1": prompt_phase1,
+        "prompt_testcases": prompt_testcases,
+        "prompt_testdata": prompt_testdata,
+        "llm": llm,
+        "warnings": [],
+    }
+
+    graph.invoke(initial_state)
 
 
-------
-selectors is a free-form JSON object (dictionary) and may contain any keys. Do not wrap selectors in another object; selectors must be a direct key/value dict.
+# ------------------------
+# Output Viewer
+# ------------------------
+
+def show_outputs(run_dir: Path):
+    st.subheader("📦 Generated Artifacts")
+
+    for file in run_dir.iterdir():
+        if not file.is_file():
+            continue
+
+        st.markdown(f"### {file.name}")
+
+        if file.suffix == ".json":
+            with open(file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            st.json(data)
+
+            st.download_button(
+                label=f"⬇️ Download {file.name}",
+                data=json.dumps(data, indent=2),
+                file_name=file.name,
+                mime="application/json"
+            )
+        else:
+            with open(file, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            st.text_area(
+                label=file.name,
+                value=content,
+                height=200
+            )
+
+
+if __name__ == "__main__":
+    main()
