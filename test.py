@@ -1,122 +1,188 @@
-ROLE:
-You are a Senior QA Architect + Data Quality Engineer.
-Your job is to generate synthetic test data specifications for automated testing.
+class NegativeOrEdgeData(BaseModel):
+    """
+    Invalid or edge-condition data sets.
+    """
+    model_config = ConfigDict(extra="forbid")
 
-NON-NEGOTIABLE RULES:
-1) Use ONLY the provided inputs: CanonicalUserStoryCIR.json, CoverageIntent.json, TestCases.json, and (optionally) AmbiguityReport.json.
-   - Do NOT invent new requirements beyond these inputs.
-2) Output MUST be valid JSON only (no markdown, no extra text).
-3) Data MUST be generic and story-agnostic: do not mention the domain, product name, brand names, or scenario-specific nouns.
-4) Every dataset must be traceable:
-   - Link each dataset to acceptance criteria IDs and test case IDs.
-5) Determinism:
-   - Use stable, predictable IDs and values.
-   - Prefer small, high-coverage datasets over large random datasets.
-6) If something is unknown or ambiguous:
-   - Use explicit placeholders (TBD/UNKNOWN) and record it in "assumptions_and_limits".
-   - Do NOT guess “realistic” values if constraints are unclear.
-7) Privacy/Safety:
-   - Do not generate any real personal data. Use clearly synthetic values only.
+    case_id: str
+    linked_acceptance_criteria: List[str]
+    linked_test_cases: List[str]
 
-INPUTS YOU WILL RECEIVE:
-#### File name : CanonicalUserStoryCIR.json
-<PASTE CONTENT>
+    description: str
+    invalid_records: List[Dict[str, Any]] = Field(default_factory=list)
+    expected_validation_or_handling: List[str] = Field(default_factory=list)
 
-#### File name : CoverageIntent.json
-<PASTE CONTENT>
 
-#### File name : TestCases.json
-<PASTE CONTENT>
+class TestDataSuite(BaseModel):
+    """
+    Top-level TestData.json container.
+    """
+    model_config = ConfigDict(extra="forbid")
 
-#### File name : AmbiguityReport.json
-<PASTE CONTENT IF AVAILABLE>
+    run_id: str
+    data_version: str = Field(default=DATA_CONTRACT_VERSION)
 
-OUTPUT:
-Return ONE JSON object named TestData.json with this exact top-level structure:
+    generation_intent: Dict[str, Any]
 
-{
-  "run_id": "<same run_id as CIR>",
-  "data_version": "TD-v1.0",
-  "generation_intent": {
-    "goal": "synthetic_test_data_for_automated_tests",
-    "notes": ["...optional..."]
-  },
-  "entities": [
-    {
-      "entity_name": "<generic name from CIR.data_entities.entities[].name or TBD>",
-      "description": "<short generic description>",
-      "key_fields": ["<field1>", "<field2>"],
-      "records": [
-        { "<field1>": "<value>", "<field2>": "<value>", "...": "<value>" }
-      ]
-    }
-  ],
-  "datasets": [
-    {
-      "dataset_id": "DS-001",
-      "purpose": "<short>",
-      "linked_acceptance_criteria": ["AC-1"],
-      "linked_test_cases": ["TC-001", "TC-002"],
-      "entity_refs": ["<entity_name>", "..."],
-      "data_profile": {
-        "size": <int>,
-        "variations": ["<what varies and why>"],
-        "constraints_covered": ["<constraint>", "..."]
-      },
-      "data_slices": [
-        {
-          "slice_id": "SL-001",
-          "description": "<short>",
-          "selectors": { "<field>": "<rule or value>" },
-          "expected_behavior_notes": ["..."]
-        }
-      ]
-    }
-  ],
-  "negative_and_edge_data": [
-    {
-      "case_id": "NEG-001",
-      "linked_acceptance_criteria": ["AC-2"],
-      "linked_test_cases": ["TC-010"],
-      "description": "<short>",
-      "invalid_records": [
-        { "<field>": "<invalid value>", "...": "<value>" }
-      ],
-      "expected_validation_or_handling": ["<generic expectation>"]
-    }
-  ],
-  "assumptions_and_limits": [
-    "TBD/UNKNOWN items that blocked precise data constraints",
-    "Any places where you had to keep data generic",
-    "Any missing entity fields in CIR"
-  ]
-}
+    entities: List[DataEntity] = Field(default_factory=list)
+    datasets: List[Dataset] = Field(default_factory=list)
+    negative_and_edge_data: List[NegativeOrEdgeData] = Field(default_factory=list)
 
-STRICT CONTENT RULES:
-A) Entities and fields:
-- Prefer using CIR.data_entities.entities[].attributes as the fields.
-- If CIR lacks attributes, infer ONLY the minimal generic fields needed to support the test cases (e.g., id/status/type/category/rank/timestamp), and document this in assumptions_and_limits.
-- Keep field names lowercase_with_underscores.
+    assumptions_and_limits: List[str] = Field(default_factory=list)
+2️⃣ generator.py
+LLM-driven generation (similar to test_design.designer)
 
-B) Values:
-- All values must be JSON primitives (string/number/boolean/null).
-- Use synthetic patterns:
-  - ids: "id-001", "id-002"
-  - timestamps: "2026-01-01T00:00:00Z" (only if needed; otherwise omit)
-  - categories: "cat-a", "cat-b"
-  - flags: true/false
-- Avoid brand/product/company names.
+python
+Copy code
+# src/test_data_design/generator.py
+from __future__ import annotations
 
-C) Coverage:
-- Ensure datasets cover:
-  - functional variations described in CoverageIntent.coverage_dimensions.functional
-  - negative and edge cases described in CoverageIntent.coverage_dimensions.negative and edge_cases
-- Keep dataset sizes small but sufficient for coverage (typically 10–50 records total across all entities unless explicitly needed).
+import json
+from typing import Any, Dict
 
-D) Traceability:
-- Every dataset MUST link to at least one AC and at least one TC.
-- Every negative/edge data case MUST link to at least one AC and at least one TC.
+from .test_data_schema import TestDataSuite
 
-E) Do not output anything except the single JSON object.
 
-NOW GENERATE TestData.json USING THE INPUTS.
+class TestDataGenerationError(Exception):
+    """Raised when test data generation fails."""
+
+
+class TestDataGenerator:
+    """
+    Generates TestData.json using LLM output.
+    """
+
+    def __init__(self, llm):
+        self.llm = llm
+
+    def generate(
+        self,
+        prompt_text: str,
+        cir: Dict[str, Any],
+        coverage: Dict[str, Any],
+        test_cases: Dict[str, Any],
+        ambiguity: Dict[str, Any] | None = None,
+    ) -> TestDataSuite:
+        """
+        Calls LLM and parses TestData.json.
+        """
+
+        rendered_prompt = prompt_text.replace(
+            "<PASTE CONTENT>",
+            json.dumps(
+                {
+                    "CanonicalUserStoryCIR.json": cir,
+                    "CoverageIntent.json": coverage,
+                    "TestCases.json": test_cases,
+                    "AmbiguityReport.json": ambiguity,
+                },
+                indent=2,
+            ),
+        )
+
+        raw = self.llm.invoke(rendered_prompt)
+
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise TestDataGenerationError(f"Invalid JSON from LLM: {e}") from e
+
+        try:
+            return TestDataSuite(**obj)
+        except Exception as e:
+            raise TestDataGenerationError(f"TestData schema validation failed: {e}") from e
+3️⃣ validator.py
+Governance rules (traceability, completeness)
+
+python
+Copy code
+# src/test_data_design/validator.py
+from __future__ import annotations
+
+from typing import List, Set
+
+from .test_data_schema import TestDataSuite
+
+
+class TestDataValidationIssue(Exception):
+    pass
+
+
+class TestDataValidator:
+    """
+    Enforces governance rules beyond schema validation.
+    """
+
+    def validate(
+        self,
+        suite: TestDataSuite,
+        known_ac_ids: Set[str],
+        known_tc_ids: Set[str],
+    ) -> None:
+        issues: List[str] = []
+
+        for ds in suite.datasets:
+            if not set(ds.linked_acceptance_criteria).intersection(known_ac_ids):
+                issues.append(f"{ds.dataset_id} has no valid AC linkage")
+
+            if not set(ds.linked_test_cases).intersection(known_tc_ids):
+                issues.append(f"{ds.dataset_id} has no valid TC linkage")
+
+        for neg in suite.negative_and_edge_data:
+            if not set(neg.linked_acceptance_criteria).intersection(known_ac_ids):
+                issues.append(f"{neg.case_id} has no valid AC linkage")
+
+            if not set(neg.linked_test_cases).intersection(known_tc_ids):
+                issues.append(f"{neg.case_id} has no valid TC linkage")
+
+        if issues:
+            raise TestDataValidationIssue(
+                "TestData governance validation failed:\n" + "\n".join(issues)
+            )
+4️⃣ mappings.py
+Reusable helpers (kept deliberately small)
+
+python
+Copy code
+# src/test_data_design/mappings.py
+"""
+Helper utilities for mapping CIR entities to data fields.
+Kept lightweight on purpose.
+"""
+
+from typing import List, Dict, Any
+
+
+def minimal_generic_fields() -> List[str]:
+    """
+    Fallback fields when CIR data_entities lack attributes.
+    """
+    return ["id", "type", "status"]
+
+
+def ensure_records_have_keys(
+    records: List[Dict[str, Any]], keys: List[str]
+) -> List[Dict[str, Any]]:
+    """
+    Ensures every record has all key fields.
+    """
+    out = []
+    for idx, r in enumerate(records, start=1):
+        r2 = dict(r)
+        for k in keys:
+            r2.setdefault(k, f"{k}-{idx:03d}")
+        out.append(r2)
+    return out
+5️⃣ __init__.py
+python
+Copy code
+# src/test_data_design/__init__.py
+"""
+Synthetic Test Data Design (T2).
+
+Responsible for:
+- Generating TestData.json
+- Validating traceability to ACs and TCs
+- Keeping data generic, deterministic, and safe
+"""
+
