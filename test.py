@@ -1,188 +1,89 @@
-class NegativeOrEdgeData(BaseModel):
+def node_generate_test_data(state: PipelineState) -> PipelineState:
     """
-    Invalid or edge-condition data sets.
+    Generates TestData.json using CIR + CoverageIntent + TestCases (+ optional AmbiguityReport).
     """
-    model_config = ConfigDict(extra="forbid")
+    llm = state["llm"]
+    artifacts = state["artifacts"]
+    prompt_testdata = state["prompt_testdata"]
 
-    case_id: str
-    linked_acceptance_criteria: List[str]
-    linked_test_cases: List[str]
+    cir_dict = artifacts["CanonicalUserStoryCIR.json"]
+    coverage_dict = artifacts["CoverageIntent.json"]
+    ambiguity_dict = artifacts.get("AmbiguityReport.json")
 
-    description: str
-    invalid_records: List[Dict[str, Any]] = Field(default_factory=list)
-    expected_validation_or_handling: List[str] = Field(default_factory=list)
+    test_cases_obj = state["test_cases_obj"]
+
+    # Use your new generator
+    from test_data_design.generator import TestDataGenerator
+    gen = TestDataGenerator(llm)
+
+    suite = gen.generate(
+        prompt_text=prompt_testdata,
+        cir=cir_dict,
+        coverage=coverage_dict,
+        test_cases=test_cases_obj,
+        ambiguity=ambiguity_dict,
+    )
+
+    # Governance validation: must link to known AC + TC IDs
+    known_ac_ids = {ac["ac_id"] for ac in cir_dict.get("functional_requirements", []) if "ac_id" in ac}
+    known_tc_ids = {tc["test_case_id"] for tc in test_cases_obj.get("test_cases", []) if "test_case_id" in tc}
+
+    from test_data_design.validator import TestDataValidator
+    TestDataValidator().validate(suite, known_ac_ids=known_ac_ids, known_tc_ids=known_tc_ids)
+
+    state["test_data_obj"] = suite.model_dump()
+    return state
+
+-----------------------
 
 
-class TestDataSuite(BaseModel):
+def node_write_test_data(state: PipelineState) -> PipelineState:
     """
-    Top-level TestData.json container.
+    Writes TestData.json into runtime/runs/<run_id>/ and updates RunManifest.json inventory.
     """
-    model_config = ConfigDict(extra="forbid")
+    import json
+    from pathlib import Path
 
-    run_id: str
-    data_version: str = Field(default=DATA_CONTRACT_VERSION)
+    run_dir = Path(state["run_dir"]).resolve()
+    out_path = run_dir / "TestData.json"
 
-    generation_intent: Dict[str, Any]
+    obj = state["test_data_obj"]
+    out_path.write_text(json.dumps(obj, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
 
-    entities: List[DataEntity] = Field(default_factory=list)
-    datasets: List[Dataset] = Field(default_factory=list)
-    negative_and_edge_data: List[NegativeOrEdgeData] = Field(default_factory=list)
-
-    assumptions_and_limits: List[str] = Field(default_factory=list)
-2️⃣ generator.py
-LLM-driven generation (similar to test_design.designer)
-
-python
-Copy code
-# src/test_data_design/generator.py
-from __future__ import annotations
-
-import json
-from typing import Any, Dict
-
-from .test_data_schema import TestDataSuite
-
-
-class TestDataGenerationError(Exception):
-    """Raised when test data generation fails."""
-
-
-class TestDataGenerator:
-    """
-    Generates TestData.json using LLM output.
-    """
-
-    def __init__(self, llm):
-        self.llm = llm
-
-    def generate(
-        self,
-        prompt_text: str,
-        cir: Dict[str, Any],
-        coverage: Dict[str, Any],
-        test_cases: Dict[str, Any],
-        ambiguity: Dict[str, Any] | None = None,
-    ) -> TestDataSuite:
-        """
-        Calls LLM and parses TestData.json.
-        """
-
-        rendered_prompt = prompt_text.replace(
-            "<PASTE CONTENT>",
-            json.dumps(
-                {
-                    "CanonicalUserStoryCIR.json": cir,
-                    "CoverageIntent.json": coverage,
-                    "TestCases.json": test_cases,
-                    "AmbiguityReport.json": ambiguity,
-                },
-                indent=2,
-            ),
-        )
-
-        raw = self.llm.invoke(rendered_prompt)
-
+    # Update manifest inventory
+    manifest_path = run_dir / "RunManifest.json"
+    if manifest_path.exists():
         try:
-            obj = json.loads(raw)
-        except json.JSONDecodeError as e:
-            raise TestDataGenerationError(f"Invalid JSON from LLM: {e}") from e
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            inv = manifest.get("file_inventory", [])
+            if "TestData.json" not in inv:
+                inv.append("TestData.json")
+                manifest["file_inventory"] = sorted(inv)
+                manifest_path.write_text(
+                    json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+        except Exception:
+            pass
 
-        try:
-            return TestDataSuite(**obj)
-        except Exception as e:
-            raise TestDataGenerationError(f"TestData schema validation failed: {e}") from e
-3️⃣ validator.py
-Governance rules (traceability, completeness)
+    return state
+------------------
+from pipeline.nodes import (
+    node_phase1_generate,
+    node_phase1_write_runtime,
+    node_generate_test_cases,
+    node_write_test_cases,
+    node_generate_test_data,      # NEW
+    node_write_test_data,         # NEW
+)
 
-python
-Copy code
-# src/test_data_design/validator.py
-from __future__ import annotations
+...
 
-from typing import List, Set
+g.add_node("generate_test_data", node_generate_test_data)
+g.add_node("write_test_data", node_write_test_data)
 
-from .test_data_schema import TestDataSuite
+...
 
-
-class TestDataValidationIssue(Exception):
-    pass
-
-
-class TestDataValidator:
-    """
-    Enforces governance rules beyond schema validation.
-    """
-
-    def validate(
-        self,
-        suite: TestDataSuite,
-        known_ac_ids: Set[str],
-        known_tc_ids: Set[str],
-    ) -> None:
-        issues: List[str] = []
-
-        for ds in suite.datasets:
-            if not set(ds.linked_acceptance_criteria).intersection(known_ac_ids):
-                issues.append(f"{ds.dataset_id} has no valid AC linkage")
-
-            if not set(ds.linked_test_cases).intersection(known_tc_ids):
-                issues.append(f"{ds.dataset_id} has no valid TC linkage")
-
-        for neg in suite.negative_and_edge_data:
-            if not set(neg.linked_acceptance_criteria).intersection(known_ac_ids):
-                issues.append(f"{neg.case_id} has no valid AC linkage")
-
-            if not set(neg.linked_test_cases).intersection(known_tc_ids):
-                issues.append(f"{neg.case_id} has no valid TC linkage")
-
-        if issues:
-            raise TestDataValidationIssue(
-                "TestData governance validation failed:\n" + "\n".join(issues)
-            )
-4️⃣ mappings.py
-Reusable helpers (kept deliberately small)
-
-python
-Copy code
-# src/test_data_design/mappings.py
-"""
-Helper utilities for mapping CIR entities to data fields.
-Kept lightweight on purpose.
-"""
-
-from typing import List, Dict, Any
-
-
-def minimal_generic_fields() -> List[str]:
-    """
-    Fallback fields when CIR data_entities lack attributes.
-    """
-    return ["id", "type", "status"]
-
-
-def ensure_records_have_keys(
-    records: List[Dict[str, Any]], keys: List[str]
-) -> List[Dict[str, Any]]:
-    """
-    Ensures every record has all key fields.
-    """
-    out = []
-    for idx, r in enumerate(records, start=1):
-        r2 = dict(r)
-        for k in keys:
-            r2.setdefault(k, f"{k}-{idx:03d}")
-        out.append(r2)
-    return out
-5️⃣ __init__.py
-python
-Copy code
-# src/test_data_design/__init__.py
-"""
-Synthetic Test Data Design (T2).
-
-Responsible for:
-- Generating TestData.json
-- Validating traceability to ACs and TCs
-- Keeping data generic, deterministic, and safe
-"""
-
+g.add_edge("write_test_cases", "generate_test_data")
+g.add_edge("generate_test_data", "write_test_data")
+g.add_edge("write_test_data", END)
