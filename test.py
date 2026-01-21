@@ -106,3 +106,7 @@ class TestDataSuite(BaseModel):
     negative_and_edge_data: List[NegativeOrEdgeData] = Field(default_factory=list)
 
     assumptions_and_limits: List[str] = Field(default_factory=list)
+
+
+------
+selectors is a free-form JSON object (dictionary) and may contain any keys. Do not wrap selectors in another object; selectors must be a direct key/value dict.
