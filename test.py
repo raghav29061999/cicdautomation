@@ -1,178 +1,108 @@
-# src/test_data_design/generator.py
+# src/test_data_design/test_data_schema.py
 from __future__ import annotations
 
-import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List
 
-from .test_data_schema import TestDataSuite
-
-
-class TestDataGenerationError(Exception):
-    """Raised when test data generation fails (parse/contract issues)."""
+from pydantic import BaseModel, ConfigDict, Field, AliasChoices
 
 
-def _coerce_llm_response_to_text(resp: Any) -> str:
+DATA_CONTRACT_VERSION = "TD-v1.0"
+
+
+# -----------------------------
+# Core components
+# -----------------------------
+
+class DataEntity(BaseModel):
     """
-    Normalize common LLM client return types to plain text.
-    - LangChain often returns AIMessage with .content
-    - Some clients return dict-like payloads
-    - Some return plain strings
+    Logical data entity used across datasets.
     """
-    if isinstance(resp, str):
-        return resp
+    model_config = ConfigDict(extra="forbid")
 
-    content = getattr(resp, "content", None)
-    if isinstance(content, str):
-        return content
+    entity_name: str
+    description: str
+    key_fields: List[str] = Field(default_factory=list)
 
-    # Dict-like fallback (some SDKs)
-    if isinstance(resp, dict):
-        # Try common keys
-        for k in ("content", "text", "message"):
-            v = resp.get(k)
-            if isinstance(v, str):
-                return v
-        return json.dumps(resp, ensure_ascii=False)
-
-    return str(resp)
+    # records are intentionally flexible but must remain JSON-serializable
+    records: List[Dict[str, Any]] = Field(default_factory=list)
 
 
-def _extract_first_json_object(text: str) -> str:
+class DataSlice(BaseModel):
     """
-    Best-effort extraction of the first JSON object from a response that may
-    include leading/trailing junk (despite the prompt saying JSON-only).
-    This is a safety net for production robustness.
+    Subset of data with selectors defining how to pick records / interpret the slice.
+    IMPORTANT: selectors MUST be a free-form dict and may contain arbitrary keys.
     """
-    s = text.strip()
-    if s.startswith("{") and s.endswith("}"):
-        return s
+    model_config = ConfigDict(extra="forbid")
 
-    start = s.find("{")
-    if start == -1:
-        raise TestDataGenerationError("No JSON object start '{' found in LLM response.")
+    slice_id: str
+    description: str
 
-    # Scan to find matching closing brace for the first JSON object
-    depth = 0
-    in_string = False
-    escape = False
-    for i in range(start, len(s)):
-        ch = s[i]
+    # FREE-FORM dict. This is the key fix for your error.
+    selectors: Dict[str, Any] = Field(default_factory=dict)
 
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_string = False
-            continue
-
-        if ch == '"':
-            in_string = True
-            continue
-
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return s[start : i + 1]
-
-    raise TestDataGenerationError("Unbalanced JSON braces; could not extract a full JSON object.")
+    expected_behavior_notes: List[str] = Field(default_factory=list)
 
 
-def _normalize_testdata_obj(obj: Dict[str, Any]) -> Dict[str, Any]:
+class Dataset(BaseModel):
     """
-    Normalize common field drifts from LLM output WITHOUT changing meaning.
-    This is the permanent guardrail that prevents brittle prompt coupling.
-
-    Current normalizations:
-    - linked_test_case -> linked_test_cases (datasets and negative_and_edge_data)
+    Dataset designed to support one or more test cases.
     """
-    # datasets[*]
-    for ds in obj.get("datasets", []) or []:
-        if isinstance(ds, dict) and "linked_test_case" in ds and "linked_test_cases" not in ds:
-            ds["linked_test_cases"] = ds.pop("linked_test_case")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    # negative_and_edge_data[*]
-    for neg in obj.get("negative_and_edge_data", []) or []:
-        if isinstance(neg, dict) and "linked_test_case" in neg and "linked_test_cases" not in neg:
-            neg["linked_test_cases"] = neg.pop("linked_test_case")
+    dataset_id: str
+    purpose: str
 
-    return obj
+    linked_acceptance_criteria: List[str] = Field(default_factory=list)
+
+    # Accept both variants from LLM output (robustness)
+    linked_test_cases: List[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("linked_test_cases", "linked_test_case"),
+    )
+
+    entity_refs: List[str] = Field(default_factory=list)
+
+    # flexible structure (we don't want schema churn here)
+    data_profile: Dict[str, Any] = Field(default_factory=dict)
+
+    data_slices: List[DataSlice] = Field(default_factory=list)
 
 
-class TestDataGenerator:
+class NegativeOrEdgeData(BaseModel):
     """
-    Generates TestData.json using LLM output.
-
-    Design goals:
-    - Works with LangChain-style AIMessage responses
-    - Recovers from minor prompt drift (field naming)
-    - Enforces schema via Pydantic (TestDataSuite)
+    Invalid or edge-condition data for negative testing.
     """
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    def __init__(self, llm: Any):
-        self.llm = llm
+    case_id: str
 
-    def generate(
-        self,
-        prompt_text: str,
-        cir: Dict[str, Any],
-        coverage: Dict[str, Any],
-        test_cases: Dict[str, Any],
-        ambiguity: Optional[Dict[str, Any]] = None,
-    ) -> TestDataSuite:
-        """
-        Generate and validate TestDataSuite.
-        """
-        # Keep injection deterministic: serialize inputs consistently
-        cir_s = json.dumps(cir, indent=2, ensure_ascii=False, sort_keys=True)
-        cov_s = json.dumps(coverage, indent=2, ensure_ascii=False, sort_keys=True)
-        tc_s = json.dumps(test_cases, indent=2, ensure_ascii=False, sort_keys=True)
-        amb_s = json.dumps(ambiguity, indent=2, ensure_ascii=False, sort_keys=True) if ambiguity else ""
+    linked_acceptance_criteria: List[str] = Field(default_factory=list)
 
-        rendered_prompt = (
-            prompt_text.replace("#### File name : CanonicalUserStoryCIR.json\n<PASTE CONTENT>", f"#### File name : CanonicalUserStoryCIR.json\n{cir_s}")
-            .replace("#### File name : CoverageIntent.json\n<PASTE CONTENT>", f"#### File name : CoverageIntent.json\n{cov_s}")
-            .replace("#### File name : TestCases.json\n<PASTE CONTENT>", f"#### File name : TestCases.json\n{tc_s}")
-        )
+    linked_test_cases: List[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("linked_test_cases", "linked_test_case"),
+    )
 
-        # Ambiguity block is optional; if the prompt includes the placeholder, fill it
-        if "#### File name : AmbiguityReport.json" in rendered_prompt:
-            if amb_s:
-                rendered_prompt = rendered_prompt.replace(
-                    "#### File name : AmbiguityReport.json\n<PASTE CONTENT IF AVAILABLE>",
-                    f"#### File name : AmbiguityReport.json\n{amb_s}",
-                )
-            else:
-                # Remove placeholder content but keep header
-                rendered_prompt = rendered_prompt.replace(
-                    "#### File name : AmbiguityReport.json\n<PASTE CONTENT IF AVAILABLE>",
-                    "#### File name : AmbiguityReport.json\n{}",
-                )
+    description: str
 
-        # Call LLM
-        resp = self.llm.invoke(rendered_prompt)
-        raw_text = _coerce_llm_response_to_text(resp)
+    invalid_records: List[Dict[str, Any]] = Field(default_factory=list)
 
-        # Parse JSON safely
-        json_text = _extract_first_json_object(raw_text)
+    expected_validation_or_handling: List[str] = Field(default_factory=list)
 
-        try:
-            obj = json.loads(json_text)
-        except json.JSONDecodeError as e:
-            raise TestDataGenerationError(f"Invalid JSON from LLM: {e}") from e
 
-        if not isinstance(obj, dict):
-            raise TestDataGenerationError("LLM output must be a JSON object at the top-level.")
+class TestDataSuite(BaseModel):
+    """
+    Top-level TestData.json container.
+    """
+    model_config = ConfigDict(extra="forbid")
 
-        obj = _normalize_testdata_obj(obj)
+    run_id: str
+    data_version: str = Field(default=DATA_CONTRACT_VERSION)
 
-        # Validate schema
-        try:
-            suite = TestDataSuite(**obj)
-        except Exception as e:
-            raise TestDataGenerationError(f"TestData schema validation failed: {e}") from e
+    generation_intent: Dict[str, Any] = Field(default_factory=dict)
 
-        return suite
+    entities: List[DataEntity] = Field(default_factory=list)
+    datasets: List[Dataset] = Field(default_factory=list)
+    negative_and_edge_data: List[NegativeOrEdgeData] = Field(default_factory=list)
+
+    assumptions_and_limits: List[str] = Field(default_factory=list)
