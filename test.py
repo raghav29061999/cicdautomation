@@ -1,90 +1,282 @@
-ROLE:
-You are a Senior QA Architect writing high-quality Gherkin specifications.
+# src/gherkin_design/__init__.py
+"""
+Gherkin Design (T3)
 
-Your job is to generate human-readable, executable Gherkin (.feature) files
-by combining structured TestCases and TestData.
+Responsible for:
+- Generating Gherkin feature files from TestCases + TestData (+ optional CIR context)
+- Validating basic Gherkin structure (Feature / Scenario presence)
+- Writing outputs to runtime/runs/<run_id>/gherkin/*.feature
 
-NON-NEGOTIABLE RULES:
-1) Use ONLY the provided inputs:
-   - TestCases.json
-   - TestData.json
-   - CanonicalUserStoryCIR.json (for context only)
-2) Do NOT invent new scenarios beyond what is implied by test cases and data.
-3) Gherkin must be deterministic, concise, and readable by non-technical stakeholders.
-4) Output MUST be plain text Gherkin (no markdown, no JSON).
-5) Each scenario MUST trace back to:
-   - at least one test_case_id
-   - at least one acceptance criteria ID
-6) Do NOT expose internal IDs in steps; keep them in comments only.
-7) Base URL:
-   - If a base URL is inferable from the story context, use it (e.g., https://www.amazon.com)
-   - Otherwise use: BASE_URL
-8) Steps must be written in business-readable English, not technical implementation steps.
+This module is intentionally tool-agnostic (Cucumber/Behave/SpecFlow later).
+"""
 
-INPUTS:
-#### File name : CanonicalUserStoryCIR.json
-<PASTE CONTENT>
+----------------------
 
-#### File name : TestCases.json
-<PASTE CONTENT>
+# src/gherkin_design/gherkin_schema.py
+from __future__ import annotations
 
-#### File name : TestData.json
-<PASTE CONTENT>
+from dataclasses import dataclass
+from typing import List
 
-#### Generation Control
-{
-  "strategy": "max_coverage | limit",
-  "max_scenarios": <integer or null>
-}
 
-OUTPUT:
-Generate one or more Gherkin feature files.
+class GherkinValidationError(Exception):
+    """Raised when generated Gherkin does not meet minimum validity rules."""
 
-Each feature file must follow this structure:
 
-Feature: <concise business feature name>
+@dataclass(frozen=True)
+class GherkinFile:
+    """
+    Represents a single .feature file payload.
+    """
+    filename: str
+    content: str
 
-  Background:
-    Given the user navigates to "<base_url>"
-    And the system is in a clean initial state
 
-  Scenario: <clear, business-readable scenario title>
-    # Traceability:
-    # TestCases: TC-001, TC-002
-    # AcceptanceCriteria: AC-1
+def validate_gherkin_minimal(content: str) -> None:
+    """
+    Minimal structural validation for Gherkin feature text.
 
-    Given <preconditions derived from TestData>
-    When <user actions derived from TestCases.steps>
-    Then <expected behavior derived from TestCases.expected_final_outcome>
+    We keep this intentionally light:
+    - Must contain 'Feature:'
+    - Must contain at least one 'Scenario:' or 'Scenario Outline:'
+    """
+    text = (content or "").strip()
+    if not text:
+        raise GherkinValidationError("Empty Gherkin content.")
 
-RULES FOR SCENARIO GENERATION:
-- Prefer 1 scenario per high-level test case.
-- Merge scenarios ONLY if they share:
-  - same preconditions
-  - same data slice
-  - same expected outcome
-- If strategy = "limit":
-  - Select the highest-risk or highest-value scenarios first.
-- If strategy = "max_coverage":
-  - Generate all meaningful scenarios needed to cover test cases.
+    if "Feature:" not in text:
+        raise GherkinValidationError("Missing 'Feature:' header in Gherkin content.")
 
-LANGUAGE RULES:
-- Use Given / When / Then correctly.
-- Use And sparingly.
-- Avoid UI implementation terms unless explicitly present in the test case.
-- Keep steps under 2 lines each.
+    if ("Scenario:" not in text) and ("Scenario Outline:" not in text):
+        raise GherkinValidationError("No 'Scenario:' or 'Scenario Outline:' found in Gherkin content.")
 
-NOW GENERATE THE GHERKIN FEATURES.
+
+def validate_files(files: List[GherkinFile]) -> None:
+    """
+    Validate a batch of Gherkin files.
+    """
+    if not files:
+        raise GherkinValidationError("No Gherkin files produced.")
+
+    for f in files:
+        if not f.filename.endswith(".feature"):
+            raise GherkinValidationError(f"Invalid filename (must end with .feature): {f.filename}")
+        validate_gherkin_minimal(f.content)
+
+
+
+-------
 
 
 
 
+# src/gherkin_design/generator.py
+from __future__ import annotations
+
+import json
+import re
+from typing import Any, Dict, List, Optional
+
+from .gherkin_schema import GherkinFile, validate_files, GherkinValidationError
 
 
---------------------------
+class GherkinGenerationError(Exception):
+    """Raised when Gherkin generation fails (LLM output/parse/validation)."""
+
+
+def _coerce_llm_response_to_text(resp: Any) -> str:
+    """
+    Normalize common LLM return types:
+    - LangChain AIMessage => .content
+    - plain string
+    - dict-like payload
+    """
+    if isinstance(resp, str):
+        return resp
+
+    content = getattr(resp, "content", None)
+    if isinstance(content, str):
+        return content
+
+    if isinstance(resp, dict):
+        for k in ("content", "text", "message"):
+            v = resp.get(k)
+            if isinstance(v, str):
+                return v
+        return json.dumps(resp, ensure_ascii=False)
+
+    return str(resp)
+
+
+_FILE_HEADER_RE = re.compile(r"^###\s*FILE:\s*(.+\.feature)\s*$", re.IGNORECASE)
+
+
+def _parse_gherkin_files(output_text: str) -> List[GherkinFile]:
+    """
+    Parse LLM output into one or many GherkinFile objects.
+
+    Supported formats:
+    1) Multi-file format (recommended):
+       ### FILE: feature_01.feature
+       <gherkin...>
+       ### FILE: feature_02.feature
+       <gherkin...>
+
+    2) Single-file raw gherkin:
+       Feature: ...
+       Scenario: ...
+    """
+    text = (output_text or "").strip()
+    if not text:
+        raise GherkinGenerationError("LLM returned empty output for Gherkin.")
+
+    lines = text.splitlines()
+    files: List[GherkinFile] = []
+
+    current_name: Optional[str] = None
+    current_buf: List[str] = []
+
+    def flush():
+        nonlocal current_name, current_buf
+        if current_name and current_buf:
+            content = "\n".join(current_buf).strip() + "\n"
+            files.append(GherkinFile(filename=current_name, content=content))
+        current_name = None
+        current_buf = []
+
+    saw_header = False
+
+    for line in lines:
+        m = _FILE_HEADER_RE.match(line.strip())
+        if m:
+            saw_header = True
+            flush()
+            current_name = m.group(1).strip()
+            continue
+        current_buf.append(line)
+
+    if saw_header:
+        flush()
+        if not files:
+            raise GherkinGenerationError("Found file headers but produced no file contents.")
+        return files
+
+    # No file headers => treat as single feature file
+    return [GherkinFile(filename="feature_01.feature", content=text.strip() + "\n")]
+
+
+class GherkinGenerator:
+    """
+    Generates Gherkin feature files (text) from CIR + TestCases + TestData.
+
+    Contract:
+    - returns a list of GherkinFile objects
+    - validates minimal Gherkin structure
+    """
+
+    def __init__(self, llm: Any):
+        self.llm = llm
+
+    def generate(
+        self,
+        prompt_text: str,
+        cir: Dict[str, Any],
+        test_cases: Dict[str, Any],
+        test_data: Dict[str, Any],
+        control: Dict[str, Any],
+    ) -> List[GherkinFile]:
+        """
+        Generate gherkin feature files.
+
+        control example:
+          {
+            "strategy": "max_coverage" | "limit",
+            "max_scenarios": 5,
+            "base_url": "https://www.amazon.com"   # optional override
+          }
+        """
+        if not isinstance(control, dict):
+            raise GherkinGenerationError("control must be a dict.")
+
+        # stable serialization to keep determinism high
+        cir_s = json.dumps(cir, indent=2, ensure_ascii=False, sort_keys=True)
+        tc_s = json.dumps(test_cases, indent=2, ensure_ascii=False, sort_keys=True)
+        td_s = json.dumps(test_data, indent=2, ensure_ascii=False, sort_keys=True)
+        control_s = json.dumps(control, indent=2, ensure_ascii=False, sort_keys=True)
+
+        rendered = (
+            prompt_text.replace("#### File name : CanonicalUserStoryCIR.json\n<PASTE CONTENT>", f"#### File name : CanonicalUserStoryCIR.json\n{cir_s}")
+            .replace("#### File name : TestCases.json\n<PASTE CONTENT>", f"#### File name : TestCases.json\n{tc_s}")
+            .replace("#### File name : TestData.json\n<PASTE CONTENT>", f"#### File name : TestData.json\n{td_s}")
+        )
+
+        # If the prompt expects a control section, inject it. If not, append it.
+        if "#### Generation Control" in rendered:
+            rendered = rendered.replace(
+                "#### Generation Control\n{...}",
+                f"#### Generation Control\n{control_s}",
+            )
+        else:
+            rendered = rendered + "\n\n#### Generation Control\n" + control_s + "\n"
+
+        # Call LLM
+        resp = self.llm.invoke(rendered)
+        raw_text = _coerce_llm_response_to_text(resp)
+
+        # Parse into one or many .feature files
+        files = _parse_gherkin_files(raw_text)
+
+        # Validate minimal gherkin structure
+        try:
+            validate_files(files)
+        except GherkinValidationError as e:
+            raise GherkinGenerationError(f"Gherkin validation failed: {e}") from e
+
+        return files
 
 
 
+----------
 
 
-      
+
+# src/gherkin_design/writer.py
+from __future__ import annotations
+
+from pathlib import Path
+from typing import List
+
+from .gherkin_schema import GherkinFile
+
+
+class GherkinWriteError(Exception):
+    pass
+
+
+def write_gherkin_files(run_dir: Path, files: List[GherkinFile]) -> Path:
+    """
+    Write Gherkin feature files into:
+      runtime/runs/<run_id>/gherkin/*.feature
+
+    Returns the gherkin output directory.
+    """
+    if not isinstance(run_dir, Path):
+        run_dir = Path(run_dir)
+
+    out_dir = run_dir / "gherkin"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for f in files:
+        # basic safety
+        safe_name = f.filename.replace("..", "").replace("\\", "/").split("/")[-1].strip()
+        if not safe_name:
+            raise GherkinWriteError("Empty filename for gherkin file.")
+        if not safe_name.endswith(".feature"):
+            safe_name = safe_name + ".feature"
+
+        path = out_dir / safe_name
+        path.write_text(f.content, encoding="utf-8")
+
+    return out_dir
+
+
