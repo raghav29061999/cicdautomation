@@ -28,12 +28,20 @@ def generate_gherkin(state: PipelineState) -> PipelineState:
 
     state.gherkin_generated = True
     return state
+----
 
-------------
-graph.add_node("generate_gherkin", generate_gherkin)
 
-graph.add_edge("generate_test_data", "generate_gherkin")
+from pathlib import Path
 
----------------
-gherkin_strategy: str = "max_coverage"
-max_gherkin_scenarios: Optional[int] = None
+
+PROMPTS_DIR = Path(__file__).parent
+
+
+def load_prompt(filename: str) -> str:
+    """
+    Load prompt text from src/prompts/.
+    """
+    path = PROMPTS_DIR / filename
+    if not path.exists():
+        raise FileNotFoundError(f"Prompt file not found: {path}")
+    return path.read_text(encoding="utf-8")
