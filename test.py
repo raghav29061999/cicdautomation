@@ -1,150 +1,90 @@
-# src/main.py
-from __future__ import annotations
+ROLE:
+You are a Senior QA Architect writing high-quality Gherkin specifications.
 
-import json
-import os
-from pathlib import Path
-import tempfile
+Your job is to generate human-readable, executable Gherkin (.feature) files
+by combining structured TestCases and TestData.
 
-import streamlit as st
-from dotenv import load_dotenv
+NON-NEGOTIABLE RULES:
+1) Use ONLY the provided inputs:
+   - TestCases.json
+   - TestData.json
+   - CanonicalUserStoryCIR.json (for context only)
+2) Do NOT invent new scenarios beyond what is implied by test cases and data.
+3) Gherkin must be deterministic, concise, and readable by non-technical stakeholders.
+4) Output MUST be plain text Gherkin (no markdown, no JSON).
+5) Each scenario MUST trace back to:
+   - at least one test_case_id
+   - at least one acceptance criteria ID
+6) Do NOT expose internal IDs in steps; keep them in comments only.
+7) Base URL:
+   - If a base URL is inferable from the story context, use it (e.g., https://www.amazon.com)
+   - Otherwise use: BASE_URL
+8) Steps must be written in business-readable English, not technical implementation steps.
 
-from src.pipeline.graph import build_graph
-from src.utils import _read_prompt_file, get_access_token, get_llm
+INPUTS:
+#### File name : CanonicalUserStoryCIR.json
+<PASTE CONTENT>
 
+#### File name : TestCases.json
+<PASTE CONTENT>
 
-# ------------------------
-# Streamlit App
-# ------------------------
+#### File name : TestData.json
+<PASTE CONTENT>
 
-def main():
-    load_dotenv()
+#### Generation Control
+{
+  "strategy": "max_coverage | limit",
+  "max_scenarios": <integer or null>
+}
 
-    st.set_page_config(
-        page_title="Agentic Test Design",
-        layout="wide"
-    )
+OUTPUT:
+Generate one or more Gherkin feature files.
 
-    st.title("🧠 Agentic Test Design Pipeline")
-    st.caption("Upload a user story → get TestCases.json + TestData.json")
+Each feature file must follow this structure:
 
-    # ------------------------
-    # Upload User Story
-    # ------------------------
-    uploaded_file = st.file_uploader(
-        "Upload User Story (.txt)",
-        type=["txt"]
-    )
+Feature: <concise business feature name>
 
-    if not uploaded_file:
-        st.info("Please upload a user story text file to begin.")
-        return
+  Background:
+    Given the user navigates to "<base_url>"
+    And the system is in a clean initial state
 
-    story_text = uploaded_file.read().decode("utf-8")
+  Scenario: <clear, business-readable scenario title>
+    # Traceability:
+    # TestCases: TC-001, TC-002
+    # AcceptanceCriteria: AC-1
 
-    st.subheader("📄 User Story Preview")
-    st.text_area(
-        label="User Story",
-        value=story_text,
-        height=200
-    )
+    Given <preconditions derived from TestData>
+    When <user actions derived from TestCases.steps>
+    Then <expected behavior derived from TestCases.expected_final_outcome>
 
-    # ------------------------
-    # Run Pipeline Button
-    # ------------------------
-    if st.button("🚀 Generate Test Artifacts", type="primary"):
-        with st.spinner("Running agentic pipeline..."):
-            try:
-                run_pipeline(story_text)
-            except Exception as e:
-                st.error("Pipeline execution failed")
-                st.exception(e)
-                return
+RULES FOR SCENARIO GENERATION:
+- Prefer 1 scenario per high-level test case.
+- Merge scenarios ONLY if they share:
+  - same preconditions
+  - same data slice
+  - same expected outcome
+- If strategy = "limit":
+  - Select the highest-risk or highest-value scenarios first.
+- If strategy = "max_coverage":
+  - Generate all meaningful scenarios needed to cover test cases.
 
-    # ------------------------
-    # Show Outputs
-    # ------------------------
-    runtime_root = Path(os.getenv("RUNTIME_ROOT", "./runtime"))
-    runs_dir = runtime_root / "runs"
+LANGUAGE RULES:
+- Use Given / When / Then correctly.
+- Use And sparingly.
+- Avoid UI implementation terms unless explicitly present in the test case.
+- Keep steps under 2 lines each.
 
-    if runs_dir.exists():
-        latest_run = sorted(runs_dir.iterdir(), key=os.path.getmtime)[-1]
-
-        st.success(f"✅ Run completed: {latest_run.name}")
-
-        show_outputs(latest_run)
-
-
-# ------------------------
-# Pipeline Runner
-# ------------------------
-
-def run_pipeline(story_text: str):
-    # Load prompts
-    prompt_phase1 = _read_prompt_file(
-        os.getenv("PROMPT_PHASE1_PATH", "./src/prompts/phase1_runtime_artifacts.txt")
-    )
-    prompt_testcases = _read_prompt_file(
-        os.getenv("PROMPT_TESTCASES_PATH", "./src/prompts/test_case_generation.txt")
-    )
-    prompt_testdata = _read_prompt_file(
-        os.getenv("PROMPT_TESTDATA_PATH", "./src/prompts/test_data_generation.txt")
-    )
-
-    # LLM
-    access_token = get_access_token()
-    llm = get_llm(access_token)
-
-    # Build graph
-    graph = build_graph().compile()
-
-    initial_state = {
-        "story_text": story_text,
-        "prompt_phase1": prompt_phase1,
-        "prompt_testcases": prompt_testcases,
-        "prompt_testdata": prompt_testdata,
-        "llm": llm,
-        "warnings": [],
-    }
-
-    graph.invoke(initial_state)
+NOW GENERATE THE GHERKIN FEATURES.
 
 
-# ------------------------
-# Output Viewer
-# ------------------------
-
-def show_outputs(run_dir: Path):
-    st.subheader("📦 Generated Artifacts")
-
-    for file in run_dir.iterdir():
-        if not file.is_file():
-            continue
-
-        st.markdown(f"### {file.name}")
-
-        if file.suffix == ".json":
-            with open(file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            st.json(data)
-
-            st.download_button(
-                label=f"⬇️ Download {file.name}",
-                data=json.dumps(data, indent=2),
-                file_name=file.name,
-                mime="application/json"
-            )
-        else:
-            with open(file, "r", encoding="utf-8") as f:
-                content = f.read()
-
-            st.text_area(
-                label=file.name,
-                value=content,
-                height=200
-            )
 
 
-if __name__ == "__main__":
-    main()
+
+
+--------------------------
+
+
+
+
+
+      
