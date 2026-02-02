@@ -1,155 +1,91 @@
-# src/ui/app.py
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
 
-import streamlit as st
 
-from src.pipeline.graph import build_graph
-from src.utils import get_access_token, get_llm, _read_prompt_file
+def node_generate_test_data(state: dict) -> dict:
+    """
+    Generate TestData.json.
+    Robustly finds TestCases from:
+      1) state['test_cases_obj']
+      2) state['test_cases']
+      3) runtime run_dir / TestCases.json
+    """
 
+    # 1) Get run_dir (writer should have set it)
+    run_dir = state.get("run_dir")
+    if not run_dir:
+        raise RuntimeError("run_dir missing in state. Phase-1 writer node must run before test data generation.")
+    run_dir_path = Path(run_dir)
 
-def run_app() -> None:
-    st.set_page_config(page_title="Test Agentic", layout="wide")
+    # 2) Fetch TestCases object robustly
+    test_cases_obj = state.get("test_cases_obj") or state.get("test_cases")
 
-    st.title("🧪 Test Agentic System")
-    st.caption("Generate Test Cases, Test Data, and Gherkin from a User Story")
+    if test_cases_obj is None:
+        tc_path = run_dir_path / "TestCases.json"
+        if tc_path.exists():
+            test_cases_obj = json.loads(tc_path.read_text(encoding="utf-8"))
 
-    # -------------------------
-    # Inputs
-    # -------------------------
-
-    st.header("1️⃣ Upload User Story")
-
-    story_file = st.file_uploader(
-        "Upload user story (.txt)",
-        type=["txt"],
-        accept_multiple_files=False,
-    )
-
-    st.header("2️⃣ Test Data Mode")
-
-    data_mode = st.radio(
-        "Choose test data strategy",
-        options=["Generate test data", "Use provided test data"],
-        index=0,
-    )
-
-    provided_testdata = None
-    if data_mode == "Use provided test data":
-        provided_testdata = st.file_uploader(
-            "Upload test data (.json or .xlsx)",
-            type=["json", "xlsx"],
-            accept_multiple_files=False,
+    if test_cases_obj is None:
+        raise RuntimeError(
+            "No TestCases available for test data generation. "
+            "Expected state['test_cases_obj'] or state['test_cases'] or runtime TestCases.json. "
+            "This usually means graph ordering is wrong (test_data ran before test_cases)."
         )
 
-    st.header("3️⃣ Gherkin Generation Control")
+    # 3) Generate using your generator (keep your existing call)
+    # NOTE: change these imports to match your actual module paths.
+    from src.test_data_design.generator import TestDataGenerator
+    from src.test_data_design.validator import validate_test_data_suite
 
-    max_gherkin = st.number_input(
-        "Max Gherkin scenarios (0 = all)",
-        min_value=0,
-        max_value=50,
-        value=5,
-        step=1,
+    llm = state["llm"]
+    prompt = state["prompt_testdata"]
+
+    cir_obj = state.get("cir_obj")
+    if cir_obj is None:
+        cir_path = run_dir_path / "CanonicalUserStoryCIR.json"
+        if not cir_path.exists():
+            raise RuntimeError("CIR missing in state and not found on disk.")
+        cir_obj = json.loads(cir_path.read_text(encoding="utf-8"))
+
+    coverage_obj = state.get("coverage_obj")
+    if coverage_obj is None:
+        cov_path = run_dir_path / "CoverageIntent.json"
+        if not cov_path.exists():
+            raise RuntimeError("CoverageIntent missing in state and not found on disk.")
+        coverage_obj = json.loads(cov_path.read_text(encoding="utf-8"))
+
+    ambiguity_obj = state.get("ambiguity_obj")
+    amb_path = run_dir_path / "AmbiguityReport.json"
+    if ambiguity_obj is None and amb_path.exists():
+        ambiguity_obj = json.loads(amb_path.read_text(encoding="utf-8"))
+
+    # 4) Generate test data
+    generator = TestDataGenerator(llm=llm, prompt=prompt)
+    test_data_obj = generator.generate(
+        cir_obj=cir_obj,
+        coverage_obj=coverage_obj,
+        test_cases_obj=test_cases_obj,
+        ambiguity_obj=ambiguity_obj,
     )
 
-    # -------------------------
-    # Run pipeline
-    # -------------------------
+    # 5) Validate and write
+    validate_test_data_suite(test_data_obj)
 
-    st.divider()
-    run_clicked = st.button("🚀 Generate Artifacts", type="primary")
+    out_path = run_dir_path / "TestData.json"
+    out_path.write_text(json.dumps(test_data_obj, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    if not run_clicked:
-        return
-
-    if not story_file:
-        st.error("Please upload a user story file.")
-        return
-
-    if data_mode == "Use provided test data" and not provided_testdata:
-        st.error("Please upload test data or switch to auto-generation.")
-        return
-
-    with st.spinner("Running pipeline..."):
-        story_text = story_file.read().decode("utf-8", errors="replace")
-
-        # Load prompts
-        prompt_phase1 = _read_prompt_file("./src/prompts/phase1_runtime_artifacts.txt")
-        prompt_testcases = _read_prompt_file("./src/prompts/test_case_generation.txt")
-        prompt_testdata = _read_prompt_file("./src/prompts/test_data_generation.txt")
-        prompt_gherkin = _read_prompt_file("./src/prompts/gherkin_generation.txt")
-
-        # LLM
-        access_token = get_access_token()
-        llm = get_llm(access_token)
-
-        # Handle provided test data
-        provided_name = None
-        provided_bytes = None
-        if data_mode == "Use provided test data":
-            provided_name = provided_testdata.name
-            provided_bytes = provided_testdata.read()
-
-        # Build graph
-        graph = build_graph().compile()
-
-        initial_state = {
-            "story_text": story_text,
-            "llm": llm,
-            "prompt_phase1": prompt_phase1,
-            "prompt_testcases": prompt_testcases,
-            "prompt_testdata": prompt_testdata,
-            "prompt_gherkin": prompt_gherkin,
-            "gherkin_max_files": int(max_gherkin),
-            "data_mode": "provided" if provided_bytes else "generate",
-            "provided_testdata_filename": provided_name,
-            "provided_testdata_bytes": provided_bytes,
-            "warnings": [],
-        }
-
-        graph.invoke(initial_state)
-
-    st.success("Pipeline completed successfully.")
-
-    # -------------------------
-    # Display outputs
-    # -------------------------
-
-    runtime_root = Path("./runtime/runs")
-    latest_run = sorted(runtime_root.iterdir(), key=lambda p: p.stat().st_mtime)[-1]
-
-    st.header("📄 Outputs")
-
-    tab_tc, tab_td, tab_gh = st.tabs(
-        ["Test Cases", "Test Data", "Gherkin"]
-    )
-
-    with tab_tc:
-        tc_path = latest_run / "TestCases.json"
-        if tc_path.exists():
-            st.json(json.loads(tc_path.read_text()))
-        else:
-            st.warning("TestCases.json not found")
-
-    with tab_td:
-        td_path = latest_run / "TestData.json"
-        if td_path.exists():
-            st.json(json.loads(td_path.read_text()))
-        else:
-            st.warning("TestData.json not found")
-
-    with tab_gh:
-        gherkin_dir = latest_run / "gherkin"
-        if not gherkin_dir.exists():
-            st.warning("No gherkin files found")
-        else:
-            for feature in sorted(gherkin_dir.glob("*.feature")):
-                st.subheader(feature.name)
-                st.code(feature.read_text(), language="gherkin")
+    # 6) Return updates back into state
+    return {
+        "test_data_obj": test_data_obj,
+        "test_data_path": str(out_path),
+    }
 
 
-# IMPORTANT: Streamlit requires this
-run_app()
+------------
+
+
+graph.add_edge("phase1", "generate_test_cases")
+graph.add_edge("generate_test_cases", "generate_test_data")
+graph.add_edge("generate_test_data", "generate_gherkin")
