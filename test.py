@@ -1,91 +1,97 @@
+# src/pipeline/graph.py
 from __future__ import annotations
 
-import json
-from pathlib import Path
+from typing import Literal
+
+from langgraph.graph import StateGraph, END
+
+from .state import PipelineState
+from . import nodes as n
 
 
-def node_generate_test_data(state: dict) -> dict:
+def _route_test_data_mode(state: PipelineState) -> Literal["ingest_user_test_data", "generate_test_data"]:
     """
-    Generate TestData.json.
-    Robustly finds TestCases from:
-      1) state['test_cases_obj']
-      2) state['test_cases']
-      3) runtime run_dir / TestCases.json
+    Decide whether to ingest user-provided test data or generate new test data.
+
+    Expected state fields:
+      - data_mode: "provided" | "generate" (default: "generate")
     """
+    mode = (state.get("data_mode") or "generate").strip().lower()
+    if mode == "provided":
+        return "ingest_user_test_data"
+    return "generate_test_data"
 
-    # 1) Get run_dir (writer should have set it)
-    run_dir = state.get("run_dir")
-    if not run_dir:
-        raise RuntimeError("run_dir missing in state. Phase-1 writer node must run before test data generation.")
-    run_dir_path = Path(run_dir)
 
-    # 2) Fetch TestCases object robustly
-    test_cases_obj = state.get("test_cases_obj") or state.get("test_cases")
+def build_graph() -> StateGraph:
+    """
+    Full pipeline (single-story run) — FIXED ORDER (stable + consistent with your prompts):
 
-    if test_cases_obj is None:
-        tc_path = run_dir_path / "TestCases.json"
-        if tc_path.exists():
-            test_cases_obj = json.loads(tc_path.read_text(encoding="utf-8"))
+    1) Phase-1 (LLM): produce artifacts (Raw, Ambiguity, CIR, Coverage, Manifest, Delta)
+    2) Persist phase-1 artifacts to runtime
+    3) Generate TestCases.json using CIR + Coverage + (optional) Ambiguity
+       Persist TestCases.json
+    4) Test data path (depends on TestCases):
+        - data_mode == "provided": ingest user .json/.xlsx → normalized TestData.json
+        - else: generate TestData.json via LLM (uses CIR + Coverage + TestCases + optional Ambiguity)
+       Persist TestData.json
+    5) Generate Gherkin .feature files using CIR + TestCases.json + TestData.json
+       Persist .feature files
+    """
+    g = StateGraph(PipelineState)
 
-    if test_cases_obj is None:
-        raise RuntimeError(
-            "No TestCases available for test data generation. "
-            "Expected state['test_cases_obj'] or state['test_cases'] or runtime TestCases.json. "
-            "This usually means graph ordering is wrong (test_data ran before test_cases)."
-        )
+    # -----------------------------
+    # Phase-1
+    # -----------------------------
+    g.add_node("generate_phase1", n.node_generate_phase1)
+    g.add_node("write_phase1", n.node_write_phase1)
 
-    # 3) Generate using your generator (keep your existing call)
-    # NOTE: change these imports to match your actual module paths.
-    from src.test_data_design.generator import TestDataGenerator
-    from src.test_data_design.validator import validate_test_data_suite
+    # -----------------------------
+    # Test cases (must come before test data in your design)
+    # -----------------------------
+    g.add_node("generate_test_cases", n.node_generate_test_cases)
+    g.add_node("write_test_cases", n.node_write_test_cases)
 
-    llm = state["llm"]
-    prompt = state["prompt_testdata"]
+    # -----------------------------
+    # Test data (branch)
+    # -----------------------------
+    g.add_node("ingest_user_test_data", n.node_ingest_user_test_data)
+    g.add_node("generate_test_data", n.node_generate_test_data)
+    g.add_node("write_test_data", n.node_write_test_data)
 
-    cir_obj = state.get("cir_obj")
-    if cir_obj is None:
-        cir_path = run_dir_path / "CanonicalUserStoryCIR.json"
-        if not cir_path.exists():
-            raise RuntimeError("CIR missing in state and not found on disk.")
-        cir_obj = json.loads(cir_path.read_text(encoding="utf-8"))
+    # -----------------------------
+    # Gherkin
+    # -----------------------------
+    g.add_node("generate_gherkin", n.node_generate_gherkin)
+    g.add_node("write_gherkin", n.node_write_gherkin)
 
-    coverage_obj = state.get("coverage_obj")
-    if coverage_obj is None:
-        cov_path = run_dir_path / "CoverageIntent.json"
-        if not cov_path.exists():
-            raise RuntimeError("CoverageIntent missing in state and not found on disk.")
-        coverage_obj = json.loads(cov_path.read_text(encoding="utf-8"))
+    # -----------------------------
+    # Edges (FIXED ORDER)
+    # -----------------------------
+    g.set_entry_point("generate_phase1")
+    g.add_edge("generate_phase1", "write_phase1")
 
-    ambiguity_obj = state.get("ambiguity_obj")
-    amb_path = run_dir_path / "AmbiguityReport.json"
-    if ambiguity_obj is None and amb_path.exists():
-        ambiguity_obj = json.loads(amb_path.read_text(encoding="utf-8"))
+    # ✅ After phase-1, generate test cases first
+    g.add_edge("write_phase1", "generate_test_cases")
+    g.add_edge("generate_test_cases", "write_test_cases")
 
-    # 4) Generate test data
-    generator = TestDataGenerator(llm=llm, prompt=prompt)
-    test_data_obj = generator.generate(
-        cir_obj=cir_obj,
-        coverage_obj=coverage_obj,
-        test_cases_obj=test_cases_obj,
-        ambiguity_obj=ambiguity_obj,
+    # ✅ Then decide test data mode (provided vs generated)
+    g.add_conditional_edges(
+        "write_test_cases",
+        _route_test_data_mode,
+        {
+            "ingest_user_test_data": "ingest_user_test_data",
+            "generate_test_data": "generate_test_data",
+        },
     )
 
-    # 5) Validate and write
-    validate_test_data_suite(test_data_obj)
+    # Both paths converge to write_test_data
+    g.add_edge("ingest_user_test_data", "write_test_data")
+    g.add_edge("generate_test_data", "write_test_data")
 
-    out_path = run_dir_path / "TestData.json"
-    out_path.write_text(json.dumps(test_data_obj, indent=2, ensure_ascii=False), encoding="utf-8")
+    # ✅ Then generate gherkin (needs TestCases + TestData)
+    g.add_edge("write_test_data", "generate_gherkin")
+    g.add_edge("generate_gherkin", "write_gherkin")
 
-    # 6) Return updates back into state
-    return {
-        "test_data_obj": test_data_obj,
-        "test_data_path": str(out_path),
-    }
+    g.add_edge("write_gherkin", END)
 
-
-------------
-
-
-graph.add_edge("phase1", "generate_test_cases")
-graph.add_edge("generate_test_cases", "generate_test_data")
-graph.add_edge("generate_test_data", "generate_gherkin")
+    return g
