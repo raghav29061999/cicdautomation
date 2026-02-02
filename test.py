@@ -1,116 +1,126 @@
-def node_write_gherkin(state: dict) -> dict:
+import re
+from typing import List, Tuple, Optional
+
+
+def _split_gherkin_files(raw: str) -> List[Tuple[str, str]]:
     """
-    Writes gherkin files to runtime/<run_id>/gherkin
+    Robust splitter:
+      1) If LLM uses markers: "### FILE: name.feature" -> split by markers.
+      2) Else split by Scenario / Scenario Outline -> one file per scenario.
+      3) Else fallback to a single file.
 
-    HARD GUARANTEE:
-      - 1 Scenario / Scenario Outline per .feature file
-
-    This enforces output structure even if upstream LLM output is one single file.
+    NEVER returns [] if raw has non-whitespace content.
     """
-    from pathlib import Path
+    if raw is None:
+        return []
 
-    run_dir = _ensure_run_dir(state)
-    files = _require(state, "gherkin_files")  # list[(filename, content)]
+    text = raw.strip()
+    if not text:
+        return []
 
-    out_dir = run_dir / "gherkin"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # ------------------------------------------------------------
+    # 1) Marker-based splitting (if present)
+    # ------------------------------------------------------------
+    if "### FILE:" in text:
+        files: List[Tuple[str, str]] = []
+        lines = text.splitlines()
 
-    def split_one_scenario_per_file(gherkin_text: str) -> list[str]:
-        """
-        Split a single gherkin text block into multiple gherkin text blocks,
-        each containing exactly one Scenario / Scenario Outline.
-        Keeps Feature header and Background (if present) in every file.
-        """
-        lines = [ln.rstrip() for ln in gherkin_text.splitlines()]
+        cur_name: Optional[str] = None
+        cur_buf: List[str] = []
 
-        # Remove empty leading/trailing lines, but keep internal spacing minimal
-        while lines and not lines[0].strip():
-            lines.pop(0)
-        while lines and not lines[-1].strip():
-            lines.pop()
-
-        if not lines:
-            return []
-
-        feature_lines: list[str] = []
-        background_lines: list[str] = []
-        scenarios: list[list[str]] = []
-
-        current: list[str] = []
-        in_background = False
-        in_scenario = False
+        def flush():
+            nonlocal cur_name, cur_buf
+            if cur_name and any(l.strip() for l in cur_buf):
+                body = "\n".join(cur_buf).strip() + "\n"
+                name = cur_name if cur_name.endswith(".feature") else f"{cur_name}.feature"
+                files.append((name, body))
+            cur_name, cur_buf = None, []
 
         for ln in lines:
-            stripped = ln.strip()
-
-            if stripped.startswith("### FILE:"):
-                # Ignore file markers entirely for splitting purposes
-                continue
-
-            if stripped.startswith("Feature:"):
-                feature_lines = [ln]
-                in_background = False
-                in_scenario = False
-                continue
-
-            if stripped.startswith("Background:"):
-                background_lines = [ln]
-                in_background = True
-                in_scenario = False
-                continue
-
-            if stripped.startswith("Scenario:") or stripped.startswith("Scenario Outline:"):
-                if current:
-                    scenarios.append(current)
-                current = [ln]
-                in_scenario = True
-                in_background = False
-                continue
-
-            # Regular line
-            if in_scenario:
-                current.append(ln)
-            elif in_background:
-                background_lines.append(ln)
+            if ln.strip().startswith("### FILE:"):
+                flush()
+                cur_name = ln.split("### FILE:", 1)[1].strip() or "feature"
+                cur_buf = []
             else:
-                # Feature description lines
-                if feature_lines:
-                    feature_lines.append(ln)
+                if cur_name is not None:
+                    cur_buf.append(ln)
 
-        if current:
-            scenarios.append(current)
+        flush()
 
-        # If no scenarios found, return as-is (single file)
-        if not scenarios:
-            return ["\n".join(lines).strip() + "\n"]
+        # If markers existed but produced nothing, fallback
+        if files:
+            return files
 
-        outputs: list[str] = []
-        for scenario_lines in scenarios:
-            out_lines: list[str] = []
-            if feature_lines:
-                out_lines.extend(feature_lines)
-                out_lines.append("")
-            if background_lines:
-                out_lines.extend(background_lines)
-                out_lines.append("")
-            out_lines.extend(scenario_lines)
+    # ------------------------------------------------------------
+    # 2) Scenario-based splitting (one scenario per file)
+    # ------------------------------------------------------------
+    # Keep original text but remove any leading junk lines before "Feature:"
+    m = re.search(r"(?m)^\s*Feature:\s+.+$", text)
+    if m:
+        text = text[m.start():].strip()
 
-            outputs.append("\n".join(out_lines).strip() + "\n")
+    # Identify Feature header and optional Background block
+    lines = [ln.rstrip() for ln in text.splitlines()]
 
-        return outputs
+    # If no scenario exists at all, fallback to single file
+    has_scenario = any(re.match(r"^\s*(Scenario:|Scenario Outline:)\s+", ln) for ln in lines)
+    if not has_scenario:
+        return [("feature_001.feature", text.strip() + "\n")]
 
-    written: list[str] = []
-    scenario_counter = 1
+    # Capture feature lines up to Background/Scenario
+    feature_block: List[str] = []
+    background_block: List[str] = []
+    scenarios: List[List[str]] = []
 
-    # Enforce split-at-write-time
-    for _name, content in files:
-        chunks = split_one_scenario_per_file(content)
-        for chunk in chunks:
-            fname = f"scenario_{scenario_counter:03d}.feature"
-            p = out_dir / fname
-            p.write_text(chunk, encoding="utf-8")
-            written.append(str(p))
-            scenario_counter += 1
+    i = 0
+    # Feature + description block
+    while i < len(lines):
+        ln = lines[i]
+        if re.match(r"^\s*Background:\s*", ln) or re.match(r"^\s*(Scenario:|Scenario Outline:)\s+", ln):
+            break
+        feature_block.append(ln)
+        i += 1
 
-    state["gherkin_dir"] = str(out_dir)
-    return {"gherkin_dir": str(out_dir), "gherkin_written": written}
+    # Background block (optional)
+    if i < len(lines) and re.match(r"^\s*Background:\s*", lines[i]):
+        while i < len(lines):
+            ln = lines[i]
+            if re.match(r"^\s*(Scenario:|Scenario Outline:)\s+", ln):
+                break
+            background_block.append(ln)
+            i += 1
+
+    # Scenario blocks
+    current: List[str] = []
+    while i < len(lines):
+        ln = lines[i]
+        if re.match(r"^\s*(Scenario:|Scenario Outline:)\s+", ln):
+            if current:
+                scenarios.append(current)
+            current = [ln]
+        else:
+            if current:
+                current.append(ln)
+        i += 1
+    if current:
+        scenarios.append(current)
+
+    # Build one file per scenario
+    out_files: List[Tuple[str, str]] = []
+    for idx, sc_lines in enumerate(scenarios, start=1):
+        body_lines: List[str] = []
+        if any(l.strip() for l in feature_block):
+            body_lines.extend(feature_block)
+            body_lines.append("")
+        if any(l.strip() for l in background_block):
+            body_lines.extend(background_block)
+            body_lines.append("")
+        body_lines.extend(sc_lines)
+
+        out_files.append((f"scenario_{idx:03d}.feature", "\n".join(body_lines).strip() + "\n"))
+
+    # Safety fallback (should never be empty here)
+    if not out_files:
+        return [("feature_001.feature", text.strip() + "\n")]
+
+    return out_files
