@@ -1,79 +1,89 @@
-# src/ui/components/chat.py
 from __future__ import annotations
-
 import streamlit as st
+import streamlit.components.v1 as components
 
-DEFAULT_WELCOME = "Welcome. Upload a story and click Run to generate artifacts."
 
-
-def init_chat(welcome: str = DEFAULT_WELCOME) -> None:
+def render_flip_cards() -> None:
+    css = """
+    <style>
+      .cards { display:flex; gap:16px; flex-wrap:wrap; }
+      .flip-card { background: transparent; width: 260px; height: 150px; perspective: 1000px; }
+      .flip-card-inner {
+        position: relative; width: 100%; height: 100%;
+        transition: transform 0.6s; transform-style: preserve-3d;
+      }
+      .flip-card:hover .flip-card-inner { transform: rotateY(180deg); }
+      .flip-card-front, .flip-card-back {
+        position: absolute; width: 100%; height: 100%;
+        -webkit-backface-visibility: hidden; backface-visibility: hidden;
+        border-radius: 14px; padding: 16px;
+        box-shadow: 0 8px 18px rgba(0,0,0,0.25);
+        display:flex; flex-direction:column; justify-content:center;
+      }
+      .flip-card-front {
+        background: linear-gradient(135deg, #0f172a, #1e3a8a);
+        color: white;
+      }
+      .flip-card-back {
+        background: linear-gradient(135deg, #111827, #334155);
+        color: white;
+        transform: rotateY(180deg);
+      }
+      .icon { font-size: 30px; margin-bottom: 8px; }
+      .title { font-size: 16px; font-weight: 700; margin: 0; }
+      .desc { font-size: 13px; opacity: 0.9; margin-top: 8px; }
+    </style>
     """
-    Initialize chat history in Streamlit session state.
+
+    html = css + """
+    <div class="cards">
+      <div class="flip-card">
+        <div class="flip-card-inner">
+          <div class="flip-card-front">
+            <div class="icon">🧠</div>
+            <p class="title">Agentic Test Design</p>
+            <p class="desc">From story → CIR → test cases</p>
+          </div>
+          <div class="flip-card-back">
+            <p class="title">Deterministic</p>
+            <p class="desc">Strict contracts, validation, traceability.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="flip-card">
+        <div class="flip-card-inner">
+          <div class="flip-card-front">
+            <div class="icon">🧪</div>
+            <p class="title">Test Data Intelligence</p>
+            <p class="desc">Generate or ingest user data</p>
+          </div>
+          <div class="flip-card-back">
+            <p class="title">Flexible</p>
+            <p class="desc">Use JSON/XLSX input or synthesize small datasets.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="flip-card">
+        <div class="flip-card-inner">
+          <div class="flip-card-front">
+            <div class="icon">📄</div>
+            <p class="title">Gherkin Specs</p>
+            <p class="desc">Business-readable scenarios</p>
+          </div>
+          <div class="flip-card-back">
+            <p class="title">Executable</p>
+            <p class="desc">One scenario per file. Links to tests & ACs via comments.</p>
+          </div>
+        </div>
+      </div>
+    </div>
     """
-    if "chat" not in st.session_state or not isinstance(st.session_state.chat, list):
-        st.session_state.chat = [{"role": "assistant", "content": welcome}]
 
+    # Height a bit bigger than cards so it doesn't clip
+    components.html(html, height=190, scrolling=False)
 
-def render_chat() -> None:
-    """
-    Render all chat messages stored in session state.
-    """
-    init_chat()
-    for msg in st.session_state.chat:
-        role = msg.get("role", "assistant")
-        content = msg.get("content", "")
-        chat_message(role=role, content=content)
-
-
-def chat_message(role: str, content: str) -> None:
-    """
-    Render a single chat message.
-    Allowed roles: 'user' | 'assistant' | 'system' (system rendered as assistant with prefix).
-    """
-    role = (role or "assistant").strip().lower()
-    if role not in {"user", "assistant", "system"}:
-        role = "assistant"
-
-    content = "" if content is None else str(content)
-
-    if role == "system":
-        with st.chat_message("assistant"):
-            st.write(f"⚙️ {content}")
-        return
-
-    with st.chat_message(role):
-        st.write(content)
-
-
-def add_system(text: str) -> None:
-    """
-    Append a system-style assistant message to chat history.
-    """
-    init_chat()
-    st.session_state.chat.append({"role": "system", "content": str(text)})
-
-
-def add_user(text: str) -> None:
-    """
-    Append a user message to chat history.
-    """
-    init_chat()
-    st.session_state.chat.append({"role": "user", "content": str(text)})
-
-
-def add_assistant(text: str) -> None:
-    """
-    Append an assistant message to chat history.
-    """
-    init_chat()
-    st.session_state.chat.append({"role": "assistant", "content": str(text)})
-
-
-def clear_chat(welcome: str = DEFAULT_WELCOME) -> None:
-    """
-    Clear chat history and re-seed with welcome message.
-    """
-    st.session_state.chat = [{"role": "assistant", "content": welcome}]
 
 -----------------------------------------------------------------------------------------------------------------------------
 ----------------------------------------------------------------------------------------------------------------------
@@ -87,98 +97,91 @@ def clear_chat(welcome: str = DEFAULT_WELCOME) -> None:
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-----------------------------------------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------------------
+import streamlit as st
+from src.ui.components.flip_cards import render_flip_cards
 
 
-# src/main.py
-from __future__ import annotations
-
-import argparse
-import subprocess
-import sys
-from pathlib import Path
-
-
-def launch_ui():
-    """
-    Launch Streamlit UI.
-    """
-    ui_app = Path(__file__).parent / "ui" / "app.py"
-
-    if not ui_app.exists():
-        raise RuntimeError("UI entrypoint not found at src/ui/app.py")
-
-    cmd = [
-        sys.executable,
-        "-m",
-        "streamlit",
-        "run",
-        str(ui_app),
-    ]
-    subprocess.run(cmd, check=True)
-
-
-def run_cli(story_path: str):
-    """
-    Run pipeline in CLI mode (no UI).
-    """
-    from src.ingestion.story_loader import load_user_stories
-    from src.pipeline.graph import build_graph
-    from src.utils.llm import get_llm, get_access_token
-    from dotenv import load_dotenv
-
-    load_dotenv()
-
-    stories = load_user_stories(Path(story_path).parent)
-    if not stories:
-        raise SystemExit(f"No story found in {story_path}")
-
-    story = next(s for s in stories if s.filename == Path(story_path).name)
-
-    llm = get_llm(get_access_token())
-
-    graph = build_graph().compile()
-
-    initial_state = {
-        "story_id": story.story_id,
-        "story_filename": story.filename,
-        "story_text": story.raw_text,
-        "llm": llm,
-        "data_mode": "generate",  # or "provided"
-        "warnings": [],
-    }
-
-    final_state = graph.invoke(initial_state)
-
-    print("\nPipeline completed successfully")
-    print("Run ID:", final_state.get("run_id"))
-    print("Output dir:", final_state.get("run_dir"))
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Agentic Test Generator")
-    parser.add_argument(
-        "--story",
-        type=str,
-        help="Run pipeline in CLI mode with a user story file",
+def render_about() -> None:
+    st.title("A new era of AI-led software quality")
+    st.write(
+        "This tool turns user stories into test cases, test data, and Gherkin specifications — "
+        "deterministically, with strong validation and traceability."
+    )
+    st.divider()
+    render_flip_cards()
+    st.divider()
+    st.subheader("What this tool does")
+    st.markdown(
+        "- **Input:** one user story (.txt)\n"
+        "- **Output:** phase-1 artifacts + TestCases.json + TestData.json (optional) + Gherkin .feature files\n"
+        "- **Guarantees:** schema validation, AC traceability, deterministic IDs"
     )
 
-    args = parser.parse_args()
 
-    if args.story:
-        run_cli(args.story)
-    else:
-        launch_ui()
+-------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------
 
 
-if __name__ == "__main__":
-    main()
+import streamlit as st
+from src.ui.components.chat import init_chat, render_chat, add_user, add_assistant
+
+
+def render_studio(run_pipeline_callback) -> None:
+    st.title("Studio")
+    st.caption("Upload a user story and generate outputs.")
+
+    init_chat()
+    render_chat()
+
+    st.divider()
+
+    story_file = st.file_uploader("Upload User Story (.txt)", type=["txt"])
+    data_file = st.file_uploader("Optional: Upload TestData (.json or .xlsx)", type=["json", "xlsx"])
+
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        run = st.button("Run", type="primary", use_container_width=True)
+    with col2:
+        clear = st.button("Clear Chat", use_container_width=True)
+
+    if clear:
+        st.session_state.chat = [{"role": "assistant", "content": "Welcome. Upload a story and click Run to generate artifacts."}]
+        st.rerun()
+
+    if run:
+        if not story_file:
+            add_assistant("Please upload a user story file first.")
+            st.rerun()
+
+        story_text = story_file.read().decode("utf-8", errors="ignore")
+        add_user(f"Uploaded: {story_file.name}")
+
+        # Run your pipeline (LangGraph)
+        result = run_pipeline_callback(story_text=story_text, data_file=data_file)
+
+        add_assistant(f"Run completed. run_id={result.get('run_id')}")
+
+        st.success("Generated outputs successfully.")
+        st.json(result)
+        st.rerun()
+-
+
+-------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------
+
 
