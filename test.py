@@ -1,117 +1,138 @@
-# src/main.py
+# src/ui/app.py
 from __future__ import annotations
 
-import argparse
-import subprocess
-import sys
+import os
 from pathlib import Path
 
+import streamlit as st
+from dotenv import load_dotenv
 
-def launch_ui():
+from src.pipeline.graph import build_graph
+
+
+# --- Small helpers -------------------------------------------------
+
+def _read_text(path: str) -> str:
+    return Path(path).read_text(encoding="utf-8")
+
+
+def _get_llm():
     """
-    Launch Streamlit UI.
+    Keep this import local so UI loads even if env/token isn’t set until runtime.
+    Works with your existing Azure pattern:
+      llm = get_llm(token)
     """
-    ui_app = Path(__file__).parent / "ui" / "app.py"
+    # Try both common layouts you’ve used in your project
+    try:
+        from src.utils.llm import get_llm, get_access_token  # type: ignore
+    except Exception:
+        from src.utils import get_llm, get_access_token  # type: ignore
 
-    if not ui_app.exists():
-        raise RuntimeError("UI entrypoint not found at src/ui/app.py")
-
-    cmd = [
-        sys.executable,
-        "-m",
-        "streamlit",
-        "run",
-        str(ui_app),
-    ]
-    subprocess.run(cmd, check=True)
+    token = get_access_token()
+    return get_llm(token)
 
 
-def run_cli(story_path: str):
+def _run_pipeline(story_text: str, data_file):
     """
-    Run pipeline in CLI mode (no UI).
+    Studio callback: runs full pipeline and returns a compact result dict.
     """
-    from src.ingestion.story_loader import load_user_stories
-    from src.pipeline.graph import build_graph
-    from src.utils.llm import get_llm, get_access_token
-    from dotenv import load_dotenv
-
     load_dotenv()
 
-    stories = load_user_stories(Path(story_path).parent)
-    if not stories:
-        raise SystemExit(f"No story found in {story_path}")
+    # Paths (keep same env override style as your main.py)
+    src_root = Path(__file__).resolve().parents[1]  # .../src
+    prompt_phase1_path = os.getenv(
+        "PROMPT_PHASE1_PATH", str(src_root / "prompts" / "phase1_runtime_artifacts.txt")
+    )
+    prompt_testcases_path = os.getenv(
+        "PROMPT_TESTCASES_PATH", str(src_root / "prompts" / "test_case_generation.txt")
+    )
+    prompt_testdata_path = os.getenv(
+        "PROMPT_TESTDATA_PATH", str(src_root / "prompts" / "test_data_generation.txt")
+    )
+    prompt_gherkin_path = os.getenv(
+        "PROMPT_GHERKIN_PATH", str(src_root / "prompts" / "gherkin_generation.txt")
+    )
 
-    story = next(s for s in stories if s.filename == Path(story_path).name)
+    prompt_phase1 = _read_text(prompt_phase1_path)
+    prompt_testcases = _read_text(prompt_testcases_path)
+    prompt_testdata = _read_text(prompt_testdata_path)
+    prompt_gherkin = _read_text(prompt_gherkin_path) if Path(prompt_gherkin_path).exists() else ""
 
-    llm = get_llm(get_access_token())
+    llm = _get_llm()
 
+    # Optional user test data file -> save to runtime/uploads
+    runtime_root = Path(os.getenv("RUNTIME_ROOT", "./runtime"))
+    uploads_dir = runtime_root / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+
+    data_mode = "generate"
+    user_test_data_path = None
+
+    if data_file is not None:
+        data_mode = "provided"
+        save_path = uploads_dir / data_file.name
+        save_path.write_bytes(data_file.getvalue())
+        user_test_data_path = str(save_path)
+
+    # Build + run graph
     graph = build_graph().compile()
 
     initial_state = {
-        "story_id": story.story_id,
-        "story_filename": story.filename,
-        "story_text": story.raw_text,
+        "story_id": "uploaded",
+        "story_filename": "uploaded_story.txt",
+        "story_text": story_text,
+
+        "prompt_phase1": prompt_phase1,
+        "prompt_testcases": prompt_testcases,
+        "prompt_testdata": prompt_testdata,
+        "prompt_gherkin": prompt_gherkin,
+
         "llm": llm,
-        "data_mode": "generate",  # or "provided"
+        "data_mode": data_mode,
+
+        # Pass both keys to be tolerant of node expectations
+        "user_test_data_path": user_test_data_path,
+        "user_test_data_filename": (data_file.name if data_file is not None else None),
+
         "warnings": [],
     }
 
     final_state = graph.invoke(initial_state)
 
-    print("\nPipeline completed successfully")
-    print("Run ID:", final_state.get("run_id"))
-    print("Output dir:", final_state.get("run_dir"))
+    return {
+        "run_id": final_state.get("run_id"),
+        "run_dir": final_state.get("run_dir"),
+        "warnings": final_state.get("warnings", []),
+    }
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Agentic Test Generator")
-    parser.add_argument(
-        "--story",
-        type=str,
-        help="Run pipeline in CLI mode with a user story file",
-    )
+# --- Streamlit app -------------------------------------------------
 
-    args = parser.parse_args()
+st.set_page_config(
+    page_title="Agentic QA Studio",
+    page_icon="🧪",
+    layout="wide",
+)
 
-    if args.story:
-        run_cli(args.story)
-    else:
-        launch_ui()
+# shared session defaults
+if "route" not in st.session_state:
+    st.session_state.route = "about"  # "about" | "studio"
 
 
-if __name__ == "__main__":
-    main()
+def _go_studio():
+    st.session_state.route = "studio"
+    st.rerun()
 
 
---------
+def _go_about():
+    st.session_state.route = "about"
+    st.rerun()
 
 
-def launch_ui():
-    """
-    Launch Streamlit UI (safe for python -m src.main).
-    """
-    ui_app = Path(__file__).parent / "ui" / "app.py"
-
-    if not ui_app.exists():
-        raise RuntimeError("UI entrypoint not found at src/ui/app.py")
-
-    cmd = [
-        sys.executable,
-        "-m",
-        "streamlit",
-        "run",
-        str(ui_app),
-        "--server.port=8501",
-        "--server.address=localhost",
-        "--server.headless=true",
-        "--browser.gatherUsageStats=false",
-    ]
-
-    print("Launching Streamlit UI at http://localhost:8501")
-    subprocess.Popen(cmd)   # ✅ non-blocking
-    raise SystemExit(0)     # ✅ prevent relaunch loop
-
-
-
-
-
+# Router
+if st.session_state.route == "about":
+    from src.ui.pages.about import render_about  # type: ignore
+    render_about(on_cta_click=_go_studio)
+else:
+    from src.ui.pages.studio import render_studio  # type: ignore
+    render_studio(run_pipeline_callback=_run_pipeline)
