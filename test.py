@@ -1,220 +1,100 @@
-# src/ui/__init__.py
+# src/main.py
 """
-UI module (Streamlit)
+Entry point for the test_agentic application.
 
-Fully isolated from pipeline internals.
-Shows only:
-- TestCases.json
-- TestData.json
-- Gherkin (.feature files)
+Default behavior:
+  python -m src.main
+    -> launches Streamlit UI (src/ui/app.py) programmatically.
 
-Entry will be wired from src/main.py later.
+Optional CLI behavior:
+  python -m src.main --cli --story ./user_story/story1.txt --data-mode generate
+  python -m src.main --cli --story ./user_story/story1.txt --data-mode provided --testdata ./data/TestData.xlsx
+
+Why this file exists:
+- Keep UI module separate (src/ui/*)
+- Provide a single stable command for users: python -m src.main
+- Avoid requiring "streamlit run ..." (often blocked in corp environments)
 """
---------------------------------------------------
 
-# src/ui/view_models.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
-
-
-@dataclass(frozen=True)
-class UploadedFile:
-    filename: str
-    content: bytes
-
-
-@dataclass(frozen=True)
-class UiRunConfig:
-    """
-    data_mode:
-      - "generate"  -> pipeline generates TestData.json
-      - "provided"  -> user uploads JSON/XLSX; pipeline uses it
-    """
-    data_mode: str
-    provided_testdata: Optional[UploadedFile] = None
-    gherkin_max_files: int = 5  # 0 => unlimited
-
--------------------
-# src/ui/render.py
-from __future__ import annotations
-
-import io
-import json
-import zipfile
-from pathlib import Path
-from typing import Dict, List, Optional
-
-import streamlit as st
-
-
-def render_outputs(run_dir: Path) -> None:
-    """
-    Render ONLY:
-      - TestCases.json
-      - TestData.json
-      - gherkin/*.feature
-    """
-    st.subheader("✅ Outputs")
-
-    tc_path = run_dir / "TestCases.json"
-    td_path = run_dir / "TestData.json"
-    gherkin_dir = run_dir / "gherkin"
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        _render_json_file(tc_path, title="TestCases.json")
-
-    with col2:
-        _render_json_file(td_path, title="TestData.json")
-
-    st.divider()
-    _render_gherkin_files(gherkin_dir)
-
-
-def _render_json_file(path: Path, title: str) -> None:
-    st.markdown(f"### {title}")
-    if not path.exists():
-        st.warning(f"{title} not found in run folder.")
-        return
-
-    try:
-        obj = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:
-        st.error(f"Failed to read {title}: {e}")
-        st.text(path.read_text(encoding="utf-8"))
-        return
-
-    st.json(obj)
-
-    st.download_button(
-        label=f"⬇️ Download {title}",
-        data=json.dumps(obj, indent=2, ensure_ascii=False).encode("utf-8"),
-        file_name=title,
-        mime="application/json",
-    )
-
-
-def _render_gherkin_files(gherkin_dir: Path) -> None:
-    st.markdown("### Gherkin (.feature) files")
-
-    if not gherkin_dir.exists() or not gherkin_dir.is_dir():
-        st.warning("No gherkin folder found for this run.")
-        return
-
-    feature_files = sorted([p for p in gherkin_dir.glob("*.feature") if p.is_file()])
-    if not feature_files:
-        st.warning("No .feature files found.")
-        return
-
-    # Preview selector
-    names = [p.name for p in feature_files]
-    selected = st.selectbox("Preview a feature file", names)
-
-    sel_path = gherkin_dir / selected
-    st.text_area("Preview", sel_path.read_text(encoding="utf-8"), height=300)
-
-    # Download ZIP
-    zip_bytes = _zip_files(feature_files)
-    st.download_button(
-        label="⬇️ Download all Gherkin as ZIP",
-        data=zip_bytes,
-        file_name="gherkin_features.zip",
-        mime="application/zip",
-    )
-
-
-def _zip_files(paths: List[Path]) -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for p in paths:
-            z.writestr(p.name, p.read_text(encoding="utf-8"))
-    return buf.getvalue()
-
--------------------
-# src/ui/app.py
-from __future__ import annotations
-
+import argparse
 import os
+import sys
 from pathlib import Path
-import time
-
-import streamlit as st
-from dotenv import load_dotenv
-
-from src.ui.view_models import UploadedFile, UiRunConfig
-from src.ui.render import render_outputs
-
-# Pipeline imports (kept minimal)
-from src.pipeline.graph import build_graph
-from src.utils import _read_prompt_file, get_access_token, get_llm
 
 
-def run_app() -> None:
+def main() -> None:
+    args = _parse_args()
+
+    if args.cli:
+        _run_cli(args)
+        return
+
+    _run_streamlit_ui()
+
+
+# ---------------------------------------------------------------------
+# UI launcher
+# ---------------------------------------------------------------------
+
+def _run_streamlit_ui() -> None:
+    """
+    Launch Streamlit UI via the Streamlit CLI entry (programmatic).
+    This is often more reliable than calling "streamlit run" directly in corp Windows setups.
+    """
+    try:
+        from streamlit.web import cli as stcli  # type: ignore
+    except Exception as e:
+        raise RuntimeError(
+            "Streamlit is not installed or cannot be imported. "
+            "Install with: pip install streamlit"
+        ) from e
+
+    app_path = Path(__file__).parent / "ui" / "app.py"
+    if not app_path.exists():
+        raise RuntimeError(f"UI app not found at: {app_path}")
+
+    # Build argv like: streamlit run <app.py> --server.headless true
+    # Headless reduces browser-launch issues; user can open localhost manually.
+    sys.argv = [
+        "streamlit",
+        "run",
+        str(app_path),
+        "--server.headless",
+        "true",
+    ]
+
+    # Optional: allow overriding port
+    port = os.getenv("STREAMLIT_PORT")
+    if port:
+        sys.argv += ["--server.port", str(port)]
+
+    stcli.main()
+
+
+# ---------------------------------------------------------------------
+# CLI runner (fallback / automation)
+# ---------------------------------------------------------------------
+
+def _run_cli(args: argparse.Namespace) -> None:
+    """
+    Run the full pipeline headlessly from CLI.
+    Shows where outputs are written. Useful when Streamlit is blocked.
+    """
+    from dotenv import load_dotenv
+
+    from src.pipeline.graph import build_graph
+    from src.utils import _read_prompt_file, get_access_token, get_llm
+
     load_dotenv()
 
-    st.set_page_config(page_title="Agentic Test Design", layout="wide")
-    st.title("🧠 Agentic Test Design Pipeline")
-    st.caption("Upload a user story → generate TestCases, TestData, and Gherkin")
+    story_path = Path(args.story)
+    if not story_path.exists():
+        raise FileNotFoundError(f"Story file not found: {story_path}")
 
-    story_file = st.file_uploader("Upload User Story (.txt)", type=["txt"])
-    if not story_file:
-        st.info("Upload a .txt user story to begin.")
-        return
+    story_text = story_path.read_text(encoding="utf-8", errors="replace")
 
-    story_text = story_file.read().decode("utf-8", errors="replace")
-    st.subheader("📄 User Story Preview")
-    st.text_area("User Story", story_text, height=200)
-
-    st.divider()
-    st.subheader("⚙️ Run Options")
-
-    data_mode = st.radio(
-        "Test Data Mode",
-        options=["generate", "provided"],
-        format_func=lambda x: "Generate test data" if x == "generate" else "Upload test data (JSON/XLSX)",
-        horizontal=True,
-    )
-
-    provided_data_file = None
-    if data_mode == "provided":
-        uploaded = st.file_uploader("Upload Test Data (.json or .xlsx)", type=["json", "xlsx"])
-        if uploaded:
-            provided_data_file = UploadedFile(filename=uploaded.name, content=uploaded.read())
-        else:
-            st.warning("Upload a Test Data file or switch mode to Generate.")
-            return
-
-    gherkin_max_files = st.number_input(
-        "Max Gherkin files (0 = unlimited)",
-        min_value=0,
-        max_value=200,
-        value=int(os.getenv("GHERKIN_MAX_FILES", "5")),
-        step=1,
-    )
-
-    config = UiRunConfig(
-        data_mode=data_mode,
-        provided_testdata=provided_data_file,
-        gherkin_max_files=int(gherkin_max_files),
-    )
-
-    st.divider()
-
-    if st.button("🚀 Run Pipeline", type="primary"):
-        with st.spinner("Running pipeline..."):
-            run_dir = _run_pipeline(story_text, config)
-
-        st.success(f"Run completed: {run_dir.name}")
-        render_outputs(run_dir)
-
-
-def _run_pipeline(story_text: str, cfg: UiRunConfig) -> Path:
-    """
-    Executes the LangGraph pipeline and returns the latest run directory path.
-    """
     # Load prompts
     prompt_phase1 = _read_prompt_file(os.getenv("PROMPT_PHASE1_PATH", "./src/prompts/phase1_runtime_artifacts.txt"))
     prompt_testcases = _read_prompt_file(os.getenv("PROMPT_TESTCASES_PATH", "./src/prompts/test_case_generation.txt"))
@@ -224,6 +104,18 @@ def _run_pipeline(story_text: str, cfg: UiRunConfig) -> Path:
     # LLM
     access_token = get_access_token()
     llm = get_llm(access_token)
+
+    # Provided test data (optional)
+    provided_filename = None
+    provided_bytes = None
+    if args.data_mode == "provided":
+        if not args.testdata:
+            raise ValueError("--testdata is required when --data-mode provided")
+        td_path = Path(args.testdata)
+        if not td_path.exists():
+            raise FileNotFoundError(f"Test data file not found: {td_path}")
+        provided_filename = td_path.name
+        provided_bytes = td_path.read_bytes()
 
     graph = build_graph().compile()
 
@@ -238,29 +130,89 @@ def _run_pipeline(story_text: str, cfg: UiRunConfig) -> Path:
         "prompt_gherkin": prompt_gherkin,
 
         # gherkin limiter
-        "gherkin_max_files": cfg.gherkin_max_files,
+        "gherkin_max_files": int(args.gherkin_max_files),
 
-        # NEW: user test data mode (pipeline wiring comes next)
-        "data_mode": cfg.data_mode,
-        "provided_testdata_filename": cfg.provided_testdata.filename if cfg.provided_testdata else None,
-        "provided_testdata_bytes": cfg.provided_testdata.content if cfg.provided_testdata else None,
+        # data mode (pipeline must support this branch)
+        "data_mode": args.data_mode,
+        "provided_testdata_filename": provided_filename,
+        "provided_testdata_bytes": provided_bytes,
 
         "warnings": [],
     }
 
     graph.invoke(initial_state)
 
-    # Find latest run folder
     runtime_root = Path(os.getenv("RUNTIME_ROOT", "./runtime"))
     runs_dir = runtime_root / "runs"
     if not runs_dir.exists():
         raise RuntimeError("runtime/runs folder not found. Pipeline did not write outputs.")
 
     latest_run = sorted(runs_dir.iterdir(), key=lambda p: p.stat().st_mtime)[-1]
-    return latest_run
----------------
 
-streamlit
-openpyxl
-python-dotenv
-pydantic>=2.0
+    print("\n✅ Pipeline run completed.")
+    print(f"Run folder: {latest_run}")
+    print("Outputs (UI-relevant):")
+    for name in ["TestCases.json", "TestData.json"]:
+        p = latest_run / name
+        print(f"  - {p} {'(OK)' if p.exists() else '(missing)'}")
+    gherkin_dir = latest_run / "gherkin"
+    if gherkin_dir.exists():
+        feats = sorted(gherkin_dir.glob("*.feature"))
+        print(f"  - {gherkin_dir} ({len(feats)} .feature files)")
+    else:
+        print("  - gherkin/ (missing)")
+
+
+# ---------------------------------------------------------------------
+# Args
+# ---------------------------------------------------------------------
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(add_help=True)
+
+    p.add_argument(
+        "--cli",
+        action="store_true",
+        help="Run headless pipeline instead of launching Streamlit UI.",
+    )
+
+    p.add_argument(
+        "--story",
+        type=str,
+        default="",
+        help="Path to user story .txt file (required in CLI mode).",
+    )
+
+    p.add_argument(
+        "--data-mode",
+        type=str,
+        choices=["generate", "provided"],
+        default="generate",
+        help="Use generated test data or user-provided test data.",
+    )
+
+    p.add_argument(
+        "--testdata",
+        type=str,
+        default="",
+        help="Path to test data file (.json/.xlsx). Required if --data-mode provided (CLI mode).",
+    )
+
+    p.add_argument(
+        "--gherkin-max-files",
+        type=int,
+        default=int(os.getenv("GHERKIN_MAX_FILES", "5")),
+        help="Max number of gherkin feature files (0 = unlimited).",
+    )
+
+    args = p.parse_args()
+
+    if args.cli:
+        if not args.story:
+            raise ValueError("--story is required when --cli is set")
+
+    return args
+
+
+if __name__ == "__main__":
+    main()
