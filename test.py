@@ -1,153 +1,117 @@
 # src/main.py
 from __future__ import annotations
 
-import os
-import sys
+import argparse
 import subprocess
+import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
-
-import streamlit as st
-from dotenv import load_dotenv
-
-from src.pipeline.graph import build_graph
-from src.utils import get_access_token, get_llm, _read_prompt_file
-
-from src.ui.pages.about import render_about
-from src.ui.pages.studio import render_studio
 
 
-def _ensure_streamlit_context() -> None:
+def launch_ui():
     """
-    If user runs: python -m src.main
-    we are NOT in a Streamlit runtime, so Streamlit UI won't render.
-
-    Fix:
-      - Relaunch this module using: python -m streamlit run <this_file>
-      - Then exit current process.
+    Launch Streamlit UI.
     """
-    # Streamlit sets these env vars when it's actually running the script.
-    in_streamlit = (
-        os.environ.get("STREAMLIT_SERVER_PORT") is not None
-        or os.environ.get("STREAMLIT_BROWSER_GATHER_USAGE_STATS") is not None
-        or os.environ.get("STREAMLIT_RUNTIME") is not None
-    )
+    ui_app = Path(__file__).parent / "ui" / "app.py"
 
-    # Another reliable check: streamlit uses a different argv pattern
-    called_by_streamlit = any("streamlit" in a.lower() for a in sys.argv)
-
-    if in_streamlit or called_by_streamlit:
-        return
-
-    # Relaunch using streamlit
-    this_file = Path(__file__).resolve()
+    if not ui_app.exists():
+        raise RuntimeError("UI entrypoint not found at src/ui/app.py")
 
     cmd = [
         sys.executable,
         "-m",
         "streamlit",
         "run",
-        str(this_file),
-        "--server.headless=true",
+        str(ui_app),
     ]
-
-    # On some corporate machines, browser auto-open may fail; user can open localhost manually.
-    print("Launching Streamlit UI via:", " ".join(cmd))
     subprocess.run(cmd, check=True)
-    raise SystemExit(0)
 
 
-def run_pipeline(*, story_text: str, data_file: Optional[Any] = None) -> Dict[str, Any]:
+def run_cli(story_path: str):
     """
-    Pipeline callback used by Studio page.
-    Must accept keyword args: story_text and data_file.
+    Run pipeline in CLI mode (no UI).
     """
+    from src.ingestion.story_loader import load_user_stories
+    from src.pipeline.graph import build_graph
+    from src.utils.llm import get_llm, get_access_token
+    from dotenv import load_dotenv
+
     load_dotenv()
 
-    runtime_root = os.getenv("RUNTIME_ROOT", "./runtime")
-    Path(runtime_root).mkdir(parents=True, exist_ok=True)
+    stories = load_user_stories(Path(story_path).parent)
+    if not stories:
+        raise SystemExit(f"No story found in {story_path}")
 
-    # Prompts (ensure these exist)
-    prompt_phase1 = _read_prompt_file(os.getenv("PROMPT_PHASE1_PATH", "./src/prompts/phase1_runtime_artifacts.txt"))
-    prompt_testcases = _read_prompt_file(os.getenv("PROMPT_TESTCASES_PATH", "./src/prompts/test_case_generation.txt"))
-    prompt_testdata = _read_prompt_file(os.getenv("PROMPT_TESTDATA_PATH", "./src/prompts/test_data_generation.txt"))
-    prompt_gherkin = _read_prompt_file(os.getenv("PROMPT_GHERKIN_PATH", "./src/prompts/gherkin_generation.txt"))
+    story = next(s for s in stories if s.filename == Path(story_path).name)
 
-    token = get_access_token()
-    llm = get_llm(token)
-
-    data_mode = "provided" if data_file is not None else "generate"
-
-    # Convert UploadedFile -> bytes + name (avoid passing file object around)
-    user_test_data_bytes = None
-    user_test_data_name = None
-    if data_file is not None:
-        try:
-            user_test_data_bytes = data_file.getvalue()
-            user_test_data_name = getattr(data_file, "name", "uploaded_data")
-        except Exception:
-            # leave as None; ingest node should handle or error clearly
-            pass
+    llm = get_llm(get_access_token())
 
     graph = build_graph().compile()
 
-    initial_state: Dict[str, Any] = {
-        "story_text": story_text,
-        "runtime_root": runtime_root,
+    initial_state = {
+        "story_id": story.story_id,
+        "story_filename": story.filename,
+        "story_text": story.raw_text,
         "llm": llm,
-
-        # prompts
-        "prompt_phase1": prompt_phase1,
-        "prompt_testcases": prompt_testcases,
-        "prompt_testdata": prompt_testdata,
-        "prompt_gherkin": prompt_gherkin,
-
-        # branching
-        "data_mode": data_mode,
-        "user_test_data_bytes": user_test_data_bytes,
-        "user_test_data_name": user_test_data_name,
-
+        "data_mode": "generate",  # or "provided"
         "warnings": [],
     }
 
     final_state = graph.invoke(initial_state)
 
-    return {
-        "run_id": final_state.get("run_id"),
-        "run_dir": final_state.get("run_dir"),
-        "warnings": final_state.get("warnings", []),
-        "test_cases_path": final_state.get("test_cases_path"),
-        "test_data_path": final_state.get("test_data_path"),
-        "gherkin_dir": final_state.get("gherkin_dir"),
-    }
+    print("\nPipeline completed successfully")
+    print("Run ID:", final_state.get("run_id"))
+    print("Output dir:", final_state.get("run_dir"))
 
 
-def main() -> None:
-    # ✅ If you ran python -m src.main, this will relaunch as Streamlit and exit.
-    _ensure_streamlit_context()
+def main():
+    parser = argparse.ArgumentParser(description="Agentic Test Generator")
+    parser.add_argument(
+        "--story",
+        type=str,
+        help="Run pipeline in CLI mode with a user story file",
+    )
 
-    # Now we are inside streamlit runtime -> render UI
-    st.set_page_config(page_title="Agentic Test Designer", layout="wide")
+    args = parser.parse_args()
 
-    if "ui_page" not in st.session_state:
-        st.session_state.ui_page = "about"
-
-    def go_studio() -> None:
-        st.session_state.ui_page = "studio"
-        st.rerun()
-
-    with st.sidebar:
-        st.title("Agentic Test Designer")
-        choice = st.radio("Navigate", ["About", "Studio"], index=0 if st.session_state.ui_page == "about" else 1)
-        st.session_state.ui_page = "about" if choice == "About" else "studio"
-        st.divider()
-        st.caption("Upload a story, optionally upload test data, then Run.")
-
-    if st.session_state.ui_page == "about":
-        render_about(on_cta_click=go_studio)
+    if args.story:
+        run_cli(args.story)
     else:
-        render_studio(run_pipeline_callback=run_pipeline)
+        launch_ui()
 
 
 if __name__ == "__main__":
     main()
+
+
+--------
+
+
+def launch_ui():
+    """
+    Launch Streamlit UI (safe for python -m src.main).
+    """
+    ui_app = Path(__file__).parent / "ui" / "app.py"
+
+    if not ui_app.exists():
+        raise RuntimeError("UI entrypoint not found at src/ui/app.py")
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        str(ui_app),
+        "--server.port=8501",
+        "--server.address=localhost",
+        "--server.headless=true",
+        "--browser.gatherUsageStats=false",
+    ]
+
+    print("Launching Streamlit UI at http://localhost:8501")
+    subprocess.Popen(cmd)   # ✅ non-blocking
+    raise SystemExit(0)     # ✅ prevent relaunch loop
+
+
+
+
+
