@@ -16,7 +16,122 @@ Design goals:
 - Minimal assumptions
 """
 
-----------------
+
+-----------
+
+# src/user_data/parser.py
+from __future__ import annotations
+
+import io
+import json
+from typing import Any, Dict, Optional
+
+import openpyxl
+
+
+class UserTestDataParseError(Exception):
+    """Raised when user-provided test data cannot be parsed."""
+
+
+def parse_user_testdata(filename: str, content: bytes) -> Dict[str, Any]:
+    """
+    Parse user-provided test data into a raw dict.
+
+    Supported inputs:
+    - .json : must be valid JSON object (ideally already TestDataSuite shape)
+    - .xlsx : must follow strict sheet layout (see normalizer docs)
+
+    Returns: raw python dict (not yet contract-validated)
+    """
+    if not filename:
+        raise UserTestDataParseError("filename is required")
+
+    if content is None:
+        raise UserTestDataParseError("content bytes are required")
+
+    lower = filename.lower().strip()
+
+    if lower.endswith(".json"):
+        return _parse_json_bytes(content)
+
+    if lower.endswith(".xlsx"):
+        return _parse_xlsx_bytes(content)
+
+    raise UserTestDataParseError(f"Unsupported file type for '{filename}'. Use .json or .xlsx")
+
+
+def _parse_json_bytes(content: bytes) -> Dict[str, Any]:
+    try:
+        txt = content.decode("utf-8")
+    except Exception as e:
+        raise UserTestDataParseError(f"Failed to decode JSON as UTF-8: {e}") from e
+
+    try:
+        obj = json.loads(txt)
+    except Exception as e:
+        raise UserTestDataParseError(f"Invalid JSON: {e}") from e
+
+    if not isinstance(obj, dict):
+        raise UserTestDataParseError("Top-level JSON must be an object")
+    return obj
+
+
+def _parse_xlsx_bytes(content: bytes) -> Dict[str, Any]:
+    """
+    Reads Excel using openpyxl into a raw structured dict.
+    This raw dict is then normalized in normalizer.py
+    """
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+    except Exception as e:
+        raise UserTestDataParseError(f"Failed to read .xlsx: {e}") from e
+
+    # Read sheets if present
+    out: Dict[str, Any] = {"_source": "xlsx"}
+
+    out["entities_sheet"] = _read_sheet_as_rows(wb, "entities")
+    out["records_sheet"] = _read_sheet_as_rows(wb, "records")
+    out["datasets_sheet"] = _read_sheet_as_rows(wb, "datasets")
+    out["data_slices_sheet"] = _read_sheet_as_rows(wb, "data_slices")
+    out["negative_sheet"] = _read_sheet_as_rows(wb, "negative")
+
+    return out
+
+
+def _read_sheet_as_rows(wb: openpyxl.Workbook, sheet_name: str) -> list[dict[str, Any]]:
+    """
+    Reads a worksheet into list[dict] using the first row as headers.
+    Missing sheet -> returns empty list (normalizer decides if it’s an error).
+    """
+    if sheet_name not in wb.sheetnames:
+        return []
+
+    ws = wb[sheet_name]
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return []
+
+    headers = [str(h).strip() if h is not None else "" for h in rows[0]]
+    headers = [h for h in headers if h]  # drop empty headers
+    if not headers:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for r in rows[1:]:
+        if r is None:
+            continue
+        row_obj: dict[str, Any] = {}
+        empty = True
+        for idx, h in enumerate(headers):
+            val = r[idx] if idx < len(r) else None
+            if val is not None and str(val).strip() != "":
+                empty = False
+            row_obj[h] = val
+        if not empty:
+            out.append(row_obj)
+
+    return out
+---
 # src/user_data/normalizer.py
 from __future__ import annotations
 
@@ -407,10 +522,7 @@ def _ensure_str_list(v: Any) -> List[str]:
         return []
     return [s]
 
-
-------------
-
-
+----
 # src/user_data/validator.py
 from __future__ import annotations
 
@@ -445,4 +557,3 @@ def _format_pydantic_errors(e: ValidationError) -> str:
         typ = err.get("type", "")
         parts.append(f"- {loc}: {msg} ({typ})")
     return "User test data schema validation failed:\n" + "\n".join(parts)
-
