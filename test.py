@@ -1,268 +1,148 @@
-src/executor/__init__.py
-from __future__ import annotations
+src/pipeline/nodes.py
 
-__all__ = [
-    "config",
-    "models",
-    "gherkin_loader",
-    "step_registry",
-    "playwright_runner",
-    "run_manager",
-    "reporter_json",
-    "reporter_pdf",
-    "artifacts",
-]
--------------------------------------------------------------------------------------------------------------------------------
-src/executor/config.py
-
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Optional
-
-
-@dataclass(frozen=True)
-class ExecutorConfig:
-    # Browser
-    headless: bool = True
-    browser: str = "chromium"  # chromium|firefox|webkit
-    slow_mo_ms: int = 0
-
-    # Timeouts
-    navigation_timeout_ms: int = 30_000
-    action_timeout_ms: int = 15_000
-
-    # Base URL control
-    base_url_override: Optional[str] = None  # if set, always use this
-
-    # Artifacts
-    take_screenshot_on_failure: bool = True
-    screenshots_dirname: str = "screenshots"
-
-    # Execution
-    stop_on_first_failure: bool = False
-
--------------------------------------------------------------------------------------------------------------------------------
-src/executor/models.py
-
-from __future__ import annotations
-
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
-
-
-@dataclass
-class Step:
-    keyword: str  # Given|When|Then|And
-    text: str
-
-
-@dataclass
-class Scenario:
-    feature_name: str
-    scenario_name: str
-    file_path: str
-    background_steps: List[Step] = field(default_factory=list)
-    steps: List[Step] = field(default_factory=list)
-
-    # Traceability (from comments)
-    linked_test_cases: List[str] = field(default_factory=list)
-    linked_acceptance_criteria: List[str] = field(default_factory=list)
-
-    # Derived/metadata
-    base_url: str = "BASE_URL"
-
-
-@dataclass
-class ScenarioResult:
-    file_path: str
-    feature_name: str
-    scenario_name: str
-    status: str  # passed|failed|skipped
-    duration_ms: int
-    error_type: Optional[str] = None
-    error_message: Optional[str] = None
-    screenshot_path: Optional[str] = None
-    step_results: List[Dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass
-class ExecutionReport:
-    run_id: str
-    run_dir: str
-    started_at_utc: str
-    finished_at_utc: str
-    base_url_used: str
-
-    total: int
-    passed: int
-    failed: int
-    skipped: int
-
-    results: List[ScenarioResult] = field(default_factory=list)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "run_id": self.run_id,
-            "run_dir": self.run_dir,
-            "started_at_utc": self.started_at_utc,
-            "finished_at_utc": self.finished_at_utc,
-            "base_url_used": self.base_url_used,
-            "summary": {
-                "total": self.total,
-                "passed": self.passed,
-                "failed": self.failed,
-                "skipped": self.skipped,
-            },
-            "results": [
-                {
-                    "file_path": r.file_path,
-                    "feature_name": r.feature_name,
-                    "scenario_name": r.scenario_name,
-                    "status": r.status,
-                    "duration_ms": r.duration_ms,
-                    "error_type": r.error_type,
-                    "error_message": r.error_message,
-                    "screenshot_path": r.screenshot_path,
-                    "step_results": r.step_results,
-                }
-                for r in self.results
-            ],
-        }
-
-
--------------------------------------------------------------------------------------------------------------------------------
-src/executor/gherkin_loader.py
-
-from __future__ import annotations
-
-import re
 from pathlib import Path
-from typing import List, Optional
 
-from .models import Step, Scenario
-
-
-_STEP_RE = re.compile(r"^(Given|When|Then|And)\s+(.*)\s*$")
-_FEATURE_RE = re.compile(r"^Feature:\s*(.*)\s*$")
-_BACKGROUND_RE = re.compile(r"^Background:\s*$")
-_SCENARIO_RE = re.compile(r"^Scenario:\s*(.*)\s*$")
-
-# Traceability comment patterns (your generator uses these)
-_TC_RE = re.compile(r"^\s*#\s*TestCases:\s*(.*)\s*$", re.IGNORECASE)
-_AC_RE = re.compile(r"^\s*#\s*AcceptanceCriteria:\s*(.*)\s*$", re.IGNORECASE)
-
-# Base URL line pattern in Background (your generator uses: Given the user navigates to "<base_url>")
-_NAV_TO_RE = re.compile(r'^(Given|And)\s+the user navigates to\s+"([^"]+)"\s*$', re.IGNORECASE)
+from src.executor.run_manager import run_features
+from src.executor.config import ExecutorConfig
 
 
-def _split_csv_like(text: str) -> List[str]:
-    parts = [p.strip() for p in text.split(",")]
-    return [p for p in parts if p]
+def node_execute_gherkin(state: dict) -> dict:
+    """
+    Execute generated Gherkin files using Playwright executor.
+    Produces:
+      runtime/runs/<run_id>/execution/report.json
+      runtime/runs/<run_id>/execution/report.pdf
+    """
+    run_id = state.get("run_id") or "UNKNOWN"
+    run_dir = state.get("run_dir")
+    if not run_dir:
+        raise RuntimeError("node_execute_gherkin: run_dir missing in state.")
 
+    run_dir_p = Path(run_dir)
+    if not run_dir_p.exists():
+        raise RuntimeError(f"node_execute_gherkin: run_dir not found: {run_dir}")
 
-def _infer_base_url(background_steps: List[Step]) -> Optional[str]:
-    for s in background_steps:
-        m = _NAV_TO_RE.match(f"{s.keyword} {s.text}")
-        if m:
-            return m.group(2).strip()
-    return None
+    # Find gherkin folder (support common variants)
+    candidates = [
+        run_dir_p / "gherkin",
+        run_dir_p / "features",
+        run_dir_p / "gherkin_files",
+        run_dir_p,  # last resort
+    ]
+    gherkin_dir = None
+    for c in candidates:
+        if c.exists() and any(c.glob("*.feature")):
+            gherkin_dir = c
+            break
 
+    if gherkin_dir is None:
+        raise RuntimeError(f"node_execute_gherkin: No .feature files found under {run_dir_p}")
 
-def load_scenario_from_file(path: Path) -> Scenario:
-    raw_lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-
-    feature_name = "Feature"
-    scenario_name = path.stem
-
-    linked_tcs: List[str] = []
-    linked_acs: List[str] = []
-
-    background_steps: List[Step] = []
-    scenario_steps: List[Step] = []
-
-    mode = "none"  # none|background|scenario
-
-    for line in raw_lines:
-        line_stripped = line.strip()
-
-        # skip empty
-        if not line_stripped:
-            continue
-
-        # feature/scenario headers
-        m = _FEATURE_RE.match(line_stripped)
-        if m:
-            feature_name = m.group(1).strip() or feature_name
-            continue
-
-        m = _BACKGROUND_RE.match(line_stripped)
-        if m:
-            mode = "background"
-            continue
-
-        m = _SCENARIO_RE.match(line_stripped)
-        if m:
-            scenario_name = m.group(1).strip() or scenario_name
-            mode = "scenario"
-            continue
-
-        # traceability comments
-        m = _TC_RE.match(line_stripped)
-        if m:
-            linked_tcs.extend(_split_csv_like(m.group(1)))
-            continue
-
-        m = _AC_RE.match(line_stripped)
-        if m:
-            linked_acs.extend(_split_csv_like(m.group(1)))
-            continue
-
-        # other comments
-        if line_stripped.startswith("#"):
-            continue
-
-        # step lines
-        sm = _STEP_RE.match(line_stripped)
-        if sm:
-            step = Step(keyword=sm.group(1), text=sm.group(2).strip())
-            if mode == "background":
-                background_steps.append(step)
-            elif mode == "scenario":
-                scenario_steps.append(step)
-            else:
-                # If no mode yet, treat as scenario steps (defensive)
-                scenario_steps.append(step)
-            continue
-
-        # ignore any other lines (e.g. tags)
-        continue
-
-    scenario = Scenario(
-        feature_name=feature_name,
-        scenario_name=scenario_name,
-        file_path=str(path),
-        background_steps=background_steps,
-        steps=scenario_steps,
-        linked_test_cases=sorted(set(linked_tcs)),
-        linked_acceptance_criteria=sorted(set(linked_acs)),
-        base_url="BASE_URL",
+    # Config – keep it simple + fast
+    cfg = ExecutorConfig(
+        headless=True,
+        browser="chromium",
+        slow_mo_ms=0,
+        stop_on_first_failure=False,
     )
 
-    inferred = _infer_base_url(background_steps)
-    if inferred:
-        scenario.base_url = inferred
+    # If you want to enforce amazon.com for your first use-case:
+    base_url_override = state.get("base_url_override") or "https://www.amazon.com"
 
-    return scenario
+    limit_files = int(state.get("execution_limit_files") or 0)  # 0 => all
+
+    report = run_features(
+        run_id=run_id,
+        run_dir=run_dir_p,
+        gherkin_dir=gherkin_dir,
+        config=cfg,
+        limit_files=limit_files,
+        base_url_override=base_url_override,
+    )
+
+    execution_dir = run_dir_p / "execution"
+    report_json = execution_dir / "report.json"
+    report_pdf = execution_dir / "report.pdf"
+
+    # Write minimal state outputs for UI
+    state["execution_report_summary"] = report.to_dict().get("summary", {})
+    state["execution_report_json_path"] = str(report_json)
+    state["execution_report_pdf_path"] = str(report_pdf)
+
+    return state
+
+-------------------------------------------------------------------------------------------------------------------------------
+src/pipeline/graph.py
+
+g.add_node("execute_gherkin", n.node_execute_gherkin)
+
+generate_gherkin -> write_gherkin -> END  -- to change
+
+g.add_edge("write_gherkin", "execute_gherkin")
+g.add_edge("execute_gherkin", END)
 
 
-def load_scenarios_from_dir(gherkin_dir: Path) -> List[Scenario]:
-    files = sorted(gherkin_dir.glob("*.feature"))
-    scenarios: List[Scenario] = []
-    for f in files:
-        scenarios.append(load_scenario_from_file(f))
-    return scenarios
+g.add_edge("write_test_cases", "generate_gherkin")
+g.add_edge("generate_gherkin", "write_gherkin")
 
+g.add_edge("write_gherkin", "execute_gherkin")
+g.add_edge("execute_gherkin", END)
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------
+src/ui/pages/studio.py
+
+Inside _render_downloads(run_dir) add:
+
+report_json = p / "execution" / "report.json"
+report_pdf = p / "execution" / "report.pdf"
+
+
+And add buttons (maybe a second row): ------
+
+st.subheader("Execution Reports")
+c1, c2 = st.columns(2)
+
+with c1:
+    if report_json.exists():
+        st.download_button(
+            "⬇️ Execution report.json",
+            data=report_json.read_bytes(),
+            file_name="report.json",
+            mime="application/json",
+            use_container_width=True,
+            key="dl_exec_report_json",
+        )
+    else:
+        st.caption("report.json not found.")
+
+with c2:
+    if report_pdf.exists():
+        st.download_button(
+            "⬇️ Execution report.pdf",
+            data=report_pdf.read_bytes(),
+            file_name="report.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+            key="dl_exec_report_pdf",
+        )
+    else:
+        st.caption("report.pdf not found.")
+
+##############
+-------------------------------------------------------------------------------------------------------------------------------
+src/ui/app.py
+
+In _run_pipeline(...), return the two paths in result dict:
+
+return {
+    "run_id": final_state.get("run_id"),
+    "run_dir": final_state.get("run_dir"),
+    "warnings": final_state.get("warnings", []),
+    "execution_report_json_path": final_state.get("execution_report_json_path"),
+    "execution_report_pdf_path": final_state.get("execution_report_pdf_path"),
+}
 
 -------------------------------------------------------------------------------------------------------------------------------
 
