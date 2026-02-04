@@ -1,66 +1,46 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
-from typing import List
 
-from .models import Scenario, Step
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
 
-
-def _clean_url(u: str) -> str:
-    # Fix common LLM artifact: "amazon. com"
-    return u.replace(" ", "").strip()
+from .models import ExecutionReport
+from .artifacts import execution_dir
 
 
-def load_scenarios_from_dir(gherkin_dir: Path) -> List[Scenario]:
-    features = sorted(gherkin_dir.glob("*.feature"))
-    scenarios: List[Scenario] = []
+def write_report_pdf(run_dir: Path, report: ExecutionReport) -> Path:
+    out_dir = execution_dir(run_dir)
+    path = out_dir / "report.pdf"
 
-    for fp in features:
-        text = fp.read_text(encoding="utf-8", errors="ignore")
-        feature_name = "Feature"
-        scenario_name = fp.stem
-        base_url = "https://www.amazon.com"
-        steps: List[Step] = []
+    c = canvas.Canvas(str(path), pagesize=A4)
+    w, h = A4
+    y = h - 48
 
-        for raw in text.splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
+    def line(txt: str, dy: int = 16):
+        nonlocal y
+        c.drawString(48, y, (txt or "")[:120])
+        y -= dy
+        if y < 72:
+            c.showPage()
+            y = h - 48
 
-            if line.lower().startswith("feature:"):
-                feature_name = line.split(":", 1)[1].strip() or feature_name
-                continue
+    d = report.to_dict()
+    s = d.get("summary", {})
 
-            if line.lower().startswith("background:"):
-                continue
+    line("Execution Report")
+    line(f"Run ID: {d.get('run_id')}")
+    line(f"Base URL: {d.get('base_url_used')}")
+    line(f"Total: {s.get('total')}  Passed: {s.get('passed')}  Failed: {s.get('failed')}  Skipped: {s.get('skipped')}")
+    line("-" * 100, dy=20)
 
-            if line.lower().startswith("scenario:"):
-                scenario_name = line.split(":", 1)[1].strip() or scenario_name
-                continue
+    for r in d.get("results", []):
+        line(f"[{r.get('status','')}] {r.get('scenario_name','')}")
+        if r.get("error"):
+            line(f"  {r['error']}")
+        if r.get("screenshot_path"):
+            line(f"  Screenshot: {r['screenshot_path']}")
+        line("", dy=10)
 
-            # Steps
-            for kw in ("Given", "When", "Then", "And"):
-                if line.startswith(kw + " "):
-                    step_text = line[len(kw) + 1 :].strip()
-
-                    # Extract base url if present
-                    if '"' in step_text and ("navigates to" in step_text.lower() or "goes to" in step_text.lower()):
-                        parts = step_text.split('"')
-                        if len(parts) >= 2 and parts[1].startswith("http"):
-                            base_url = _clean_url(parts[1])
-
-                    steps.append(Step(keyword=kw, text=step_text))
-                    break
-
-        scenarios.append(
-            Scenario(
-                feature_name=feature_name,
-                scenario_name=scenario_name,
-                base_url=base_url,
-                steps=steps,
-                feature_file=fp.name,
-            )
-        )
-
-    return scenarios
+    c.save()
+    return path
