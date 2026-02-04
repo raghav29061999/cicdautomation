@@ -1,86 +1,43 @@
-from __future__ import annotations
+def node_execute_gherkin(state: dict) -> dict:
+    run_id = (state.get("run_id") or "UNKNOWN").strip()
+    run_dir = state.get("run_dir")
+    if not run_dir:
+        raise RuntimeError("node_execute_gherkin: run_dir missing in state.")
 
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import List, Optional
+    run_dir_p = Path(run_dir)
+    if not run_dir_p.exists():
+        raise RuntimeError(f"node_execute_gherkin: run_dir not found: {run_dir_p}")
 
-from .config import ExecutorConfig
-from .gherkin_loader import load_scenarios_from_dir
-from .models import ExecutionReport, ScenarioResult
-from .playwright_runner import run_scenario
-from .reporter_json import write_report_json
-from .reporter_pdf import write_report_pdf
-from .artifacts import execution_dir
+    # Find gherkin folder
+    candidates = [run_dir_p / "gherkin", run_dir_p / "features", run_dir_p / "gherkin_files", run_dir_p]
+    gherkin_dir: Optional[Path] = None
+    for c in candidates:
+        if c.exists() and any(c.glob("*.feature")):
+            gherkin_dir = c
+            break
+    if gherkin_dir is None:
+        raise RuntimeError(f"node_execute_gherkin: No .feature files found under {run_dir_p}")
 
+    from src.executor.config import ExecutorConfig
+    from src.executor.runner import run_features
 
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    base_url_override = (state.get("base_url_override") or "https://www.amazon.com").replace(" ", "").strip()
+    limit_files = int(state.get("execution_limit_files") or 0)
 
+    cfg = ExecutorConfig(headless=True)
 
-def run_features(
-    run_id: str,
-    run_dir: Path,
-    gherkin_dir: Path,
-    config: Optional[ExecutorConfig] = None,
-    limit_files: int = 0,
-    base_url_override: Optional[str] = None,
-) -> ExecutionReport:
-    cfg = config or ExecutorConfig()
-
-    if base_url_override:
-        cfg = ExecutorConfig(
-            headless=cfg.headless,
-            browser=cfg.browser,
-            slow_mo_ms=cfg.slow_mo_ms,
-            navigation_timeout_ms=cfg.navigation_timeout_ms,
-            action_timeout_ms=cfg.action_timeout_ms,
-            base_url_override=base_url_override,
-            take_screenshot_on_failure=cfg.take_screenshot_on_failure,
-            screenshots_dirname=cfg.screenshots_dirname,
-            stop_on_first_failure=cfg.stop_on_first_failure,
-        )
-
-    started = utc_now_iso()
-    scenarios = load_scenarios_from_dir(gherkin_dir)
-
-    if limit_files and limit_files > 0:
-        scenarios = scenarios[:limit_files]
-
-    # ensure execution folder exists
-    _ = execution_dir(run_dir)
-
-    results: List[ScenarioResult] = []
-    passed = failed = skipped = 0
-
-    base_used = cfg.base_url_override or (scenarios[0].base_url if scenarios else "BASE_URL")
-
-    for sc in scenarios:
-        r = run_scenario(sc, run_dir=run_dir, config=cfg)
-        results.append(r)
-        if r.status == "passed":
-            passed += 1
-        elif r.status == "failed":
-            failed += 1
-            if cfg.stop_on_first_failure:
-                break
-        else:
-            skipped += 1
-
-    finished = utc_now_iso()
-
-    report = ExecutionReport(
+    report = run_features(
         run_id=run_id,
-        run_dir=str(run_dir),
-        started_at_utc=started,
-        finished_at_utc=finished,
-        base_url_used=base_used,
-        total=len(results),
-        passed=passed,
-        failed=failed,
-        skipped=skipped,
-        results=results,
+        run_dir=run_dir_p,
+        gherkin_dir=gherkin_dir,
+        config=cfg,
+        limit_files=limit_files,
+        base_url_override=base_url_override,
     )
 
-    write_report_json(run_dir, report)
-    write_report_pdf(run_dir, report)
-    return report
+    execution_dir = run_dir_p / "execution"
+    state["execution_report_summary"] = report.to_dict().get("summary", {})
+    state["execution_report_json_path"] = str(execution_dir / "report.json")
+    state["execution_report_pdf_path"] = str(execution_dir / "report.pdf")
+    state["execution_dir"] = str(execution_dir)
+    return state
