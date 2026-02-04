@@ -1,62 +1,66 @@
-
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Optional
+import re
+from pathlib import Path
+from typing import List
+
+from .models import Scenario, Step
 
 
-@dataclass
-class Step:
-    keyword: str  # Given/When/Then/And
-    text: str
+def _clean_url(u: str) -> str:
+    # Fix common LLM artifact: "amazon. com"
+    return u.replace(" ", "").strip()
 
 
-@dataclass
-class Scenario:
-    feature_name: str
-    scenario_name: str
-    base_url: str
-    steps: List[Step]
-    feature_file: str  # file name
+def load_scenarios_from_dir(gherkin_dir: Path) -> List[Scenario]:
+    features = sorted(gherkin_dir.glob("*.feature"))
+    scenarios: List[Scenario] = []
 
+    for fp in features:
+        text = fp.read_text(encoding="utf-8", errors="ignore")
+        feature_name = "Feature"
+        scenario_name = fp.stem
+        base_url = "https://www.amazon.com"
+        steps: List[Step] = []
 
-@dataclass
-class ScenarioResult:
-    feature_file: str
-    scenario_name: str
-    status: str  # passed|failed|skipped
-    error: Optional[str] = None
-    duration_ms: Optional[int] = None
-    screenshot_path: Optional[str] = None
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
 
+            if line.lower().startswith("feature:"):
+                feature_name = line.split(":", 1)[1].strip() or feature_name
+                continue
 
-@dataclass
-class ExecutionReport:
-    run_id: str
-    run_dir: str
-    started_at_utc: str
-    finished_at_utc: str
-    base_url_used: str
+            if line.lower().startswith("background:"):
+                continue
 
-    total: int
-    passed: int
-    failed: int
-    skipped: int
+            if line.lower().startswith("scenario:"):
+                scenario_name = line.split(":", 1)[1].strip() or scenario_name
+                continue
 
-    results: List[ScenarioResult]
+            # Steps
+            for kw in ("Given", "When", "Then", "And"):
+                if line.startswith(kw + " "):
+                    step_text = line[len(kw) + 1 :].strip()
 
-    def to_dict(self) -> dict:
-        return {
-            "run_id": self.run_id,
-            "run_dir": self.run_dir,
-            "started_at_utc": self.started_at_utc,
-            "finished_at_utc": self.finished_at_utc,
-            "base_url_used": self.base_url_used,
-            "summary": {
-                "total": self.total,
-                "passed": self.passed,
-                "failed": self.failed,
-                "skipped": self.skipped,
-            },
-            "results": [r.__dict__ for r in self.results],
-        }
+                    # Extract base url if present
+                    if '"' in step_text and ("navigates to" in step_text.lower() or "goes to" in step_text.lower()):
+                        parts = step_text.split('"')
+                        if len(parts) >= 2 and parts[1].startswith("http"):
+                            base_url = _clean_url(parts[1])
+
+                    steps.append(Step(keyword=kw, text=step_text))
+                    break
+
+        scenarios.append(
+            Scenario(
+                feature_name=feature_name,
+                scenario_name=scenario_name,
+                base_url=base_url,
+                steps=steps,
+                feature_file=fp.name,
+            )
+        )
+
+    return scenarios
