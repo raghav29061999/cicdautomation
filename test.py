@@ -1,43 +1,105 @@
-def node_execute_gherkin(state: dict) -> dict:
-    run_id = (state.get("run_id") or "UNKNOWN").strip()
-    run_dir = state.get("run_dir")
-    if not run_dir:
-        raise RuntimeError("node_execute_gherkin: run_dir missing in state.")
+# src/utils/logging.py
+from __future__ import annotations
 
+import logging
+import os
+import sys
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterator, Optional
+
+
+LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+
+
+def _ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
+
+
+def get_run_logger(
+    *,
+    run_id: str,
+    run_dir: str | Path,
+    name: str = "agentic",
+    level: int = logging.INFO,
+) -> logging.Logger:
+    """
+    Returns a logger that logs to:
+      - runtime/runs/<run_id>/logs/run.log
+      - stdout
+
+    Safe to call multiple times: handlers won't duplicate.
+    """
     run_dir_p = Path(run_dir)
-    if not run_dir_p.exists():
-        raise RuntimeError(f"node_execute_gherkin: run_dir not found: {run_dir_p}")
+    logs_dir = run_dir_p / "logs"
+    _ensure_dir(logs_dir)
 
-    # Find gherkin folder
-    candidates = [run_dir_p / "gherkin", run_dir_p / "features", run_dir_p / "gherkin_files", run_dir_p]
-    gherkin_dir: Optional[Path] = None
-    for c in candidates:
-        if c.exists() and any(c.glob("*.feature")):
-            gherkin_dir = c
-            break
-    if gherkin_dir is None:
-        raise RuntimeError(f"node_execute_gherkin: No .feature files found under {run_dir_p}")
+    log_path = logs_dir / "run.log"
 
-    from src.executor.config import ExecutorConfig
-    from src.executor.runner import run_features
+    logger_name = f"{name}.{run_id}"
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(level)
+    logger.propagate = False  # prevent double logging via root
 
-    base_url_override = (state.get("base_url_override") or "https://www.amazon.com").replace(" ", "").strip()
-    limit_files = int(state.get("execution_limit_files") or 0)
+    # Avoid duplicate handlers if called again
+    if getattr(logger, "_configured", False):
+        return logger
 
-    cfg = ExecutorConfig(headless=True)
+    formatter = logging.Formatter(LOG_FORMAT)
 
-    report = run_features(
-        run_id=run_id,
-        run_dir=run_dir_p,
-        gherkin_dir=gherkin_dir,
-        config=cfg,
-        limit_files=limit_files,
-        base_url_override=base_url_override,
-    )
+    # File handler
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setLevel(level)
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
 
-    execution_dir = run_dir_p / "execution"
-    state["execution_report_summary"] = report.to_dict().get("summary", {})
-    state["execution_report_json_path"] = str(execution_dir / "report.json")
-    state["execution_report_pdf_path"] = str(execution_dir / "report.pdf")
-    state["execution_dir"] = str(execution_dir)
+    # Console handler
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setLevel(level)
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
+
+    logger._configured = True  # type: ignore[attr-defined]
+    logger.info("Logger initialized. log_file=%s", str(log_path))
+    return logger
+
+
+@dataclass
+class StepResult:
+    step: str
+    status: str  # success|failure
+    duration_ms: int
+    error: Optional[str] = None
+
+
+@contextmanager
+def log_step(logger: logging.Logger, step_name: str) -> Iterator[None]:
+    """
+    Context manager for step-level logging with timing + exception capture.
+    """
+    start = time.time()
+    logger.info("STEP_START | %s", step_name)
+    try:
+        yield
+        dur = int((time.time() - start) * 1000)
+        logger.info("STEP_END   | %s | status=success | duration_ms=%d", step_name, dur)
+    except Exception as e:
+        dur = int((time.time() - start) * 1000)
+        logger.exception(
+            "STEP_END   | %s | status=failure | duration_ms=%d | error=%s: %s",
+            step_name,
+            dur,
+            type(e).__name__,
+            e,
+        )
+        raise
+
+
+def attach_logger_to_state(state: dict, logger: logging.Logger) -> dict:
+    """
+    Convenience: store logger in pipeline state. (Not JSON-serializable; runtime only.)
+    """
+    state["logger"] = logger
     return state
