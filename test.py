@@ -1,64 +1,43 @@
-from __future__ import annotations
+def _call_agent(agent_obj: Any, message: str, session_id: str, metadata: Dict[str, Any]) -> str:
+    """
+    Calls agent with flexible signatures:
+    - run(input=...)
+    - run(message=...)
+    - run(...)
+    - respond(message)
+    - __call__(...)
+    """
+    # 1) run() with input kw
+    if hasattr(agent_obj, "run") and callable(agent_obj.run):
+        try:
+            out = agent_obj.run(input=message, session_id=session_id, metadata=metadata)
+            return out if isinstance(out, str) else str(out)
+        except TypeError:
+            pass
 
-import logging
-import time
-from typing import Any, Dict
+        # 2) run() with message kw
+        try:
+            out = agent_obj.run(message=message, session_id=session_id, metadata=metadata)
+            return out if isinstance(out, str) else str(out)
+        except TypeError:
+            pass
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+        # 3) run() positional only
+        out = agent_obj.run(message)
+        return out if isinstance(out, str) else str(out)
 
-from src.api.logging_setup import configure_logging
-from src.api.store import InMemoryEventStore
-from src.api.routes import chat_router, dashboard_router, insights_router
+    # 4) respond(message)
+    if hasattr(agent_obj, "respond") and callable(agent_obj.respond):
+        out = agent_obj.respond(message)
+        return out if isinstance(out, str) else str(out)
 
-log = logging.getLogger("api.app_factory")
+    # 5) callable agent
+    if callable(agent_obj):
+        try:
+            out = agent_obj(input=message, session_id=session_id, metadata=metadata)
+            return out if isinstance(out, str) else str(out)
+        except TypeError:
+            out = agent_obj(message)
+            return out if isinstance(out, str) else str(out)
 
-
-def create_app(
-    base_app: FastAPI | None,
-    agents: Dict[str, Any],
-    store: InMemoryEventStore,
-) -> FastAPI:
-    configure_logging()
-
-    app = base_app or FastAPI(title="Agno Agent Backend")
-
-    # ---- Basic request logging middleware ----
-    @app.middleware("http")
-    async def request_logger(request: Request, call_next):
-        start = time.time()
-        resp = await call_next(request)
-        ms = int((time.time() - start) * 1000)
-        log.info("%s %s -> %s (%dms)", request.method, request.url.path, resp.status_code, ms)
-        return resp
-
-    # ---- Routers ----
-    app.include_router(chat_router)
-    app.include_router(dashboard_router)
-    app.include_router(insights_router)
-
-    # ---- Dependency overrides (THIS is the key fix) ----
-    from src.api.routes import chat as chat_mod
-    from src.api.routes import dashboard as dash_mod
-    from src.api.routes import insights as ins_mod
-
-    app.dependency_overrides[chat_mod.get_agents] = lambda: agents
-    app.dependency_overrides[chat_mod.get_store] = lambda: store
-
-    app.dependency_overrides[dash_mod.get_agents] = lambda: agents
-    app.dependency_overrides[dash_mod.get_store] = lambda: store
-
-    app.dependency_overrides[ins_mod.get_store] = lambda: store
-
-    # ---- Simple health ----
-    @app.get("/health")
-    def health():
-        return {"status": "ok"}
-
-    # ---- Simple global error shaping (optional) ----
-    @app.exception_handler(Exception)
-    async def unhandled_exception_handler(request: Request, exc: Exception):
-        log.exception("Unhandled error: %s", exc)
-        return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
-
-    return app
+    raise TypeError(f"Agent {type(agent_obj).__name__} has no callable interface (run/respond/__call__).")
