@@ -1,87 +1,98 @@
-from __future__ import annotations
+pip install sqlglot psycopg[binary] psycopg_pool
 
-from dataclasses import dataclass
-from typing import Dict, Optional
-
-
-@dataclass(frozen=True)
-class RouteDecision:
-    agent_name: str
-    reason: str
-
-
-class AgentRouter:
-    """
-    Table-aware routing.
-
-    Use a config-driven mapping. You can replace this with DB-driven routing later.
-    """
-
-    def __init__(self, table_prefix_to_agent: Optional[Dict[str, str]] = None, default_agent: str = "agent_1"):
-        self._map = table_prefix_to_agent or {}
-        self._default = default_agent
-
-    def route(self, table: Optional[str]) -> RouteDecision:
-        if not table:
-            return RouteDecision(agent_name=self._default, reason="No table selected; default routing")
-
-        # Example: map by schema prefix or naming conventions:
-        # table="public.orders" => name="orders"
-        _, name = table.split(".", 1)
-
-        for prefix, agent in self._map.items():
-            if name.startswith(prefix):
-                return RouteDecision(agent_name=agent, reason=f"Table name starts with '{prefix}'")
-
-        return RouteDecision(agent_name=self._default, reason="No mapping match; default routing")
-
-
-
-
-
-
-
-
-
-
-
-------------------------------------------------------------------------------
-
-
-
-
-
+-------------
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Set, Optional
+from typing import List, Optional, Set, Tuple
+
+import sqlglot
+from sqlglot import exp
+
+
+DISALLOWED_KEYWORDS = {
+    "INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT",
+    "CREATE", "ALTER", "DROP", "TRUNCATE",
+    "GRANT", "REVOKE",
+    "COPY", "CALL", "DO", "EXECUTE",
+    "SET", "RESET",
+}
 
 
 @dataclass(frozen=True)
-class AccessDecision:
-    allowed: bool
+class SqlValidationResult:
+    ok: bool
     reason: str
+    referenced_tables: Tuple[str, ...] = ()
 
 
-class TableAccessController:
+class ReadOnlySqlValidator:
     """
-    Enforces that the user can only query tables they are allowed to.
-
-    Plug this into your real auth/session model. For now, it accepts a set[str]
-    of allowed tables (e.g., from request.state.user, or your store).
+    Validates that SQL is:
+      - single statement
+      - read-only (SELECT or WITH ... SELECT)
+      - references only allowed tables (optional)
     """
 
-    def __init__(self, allowed_tables: Optional[Iterable[str]] = None):
-        self.allowed_tables: Set[str] = set(t.strip() for t in (allowed_tables or []) if t and t.strip())
+    def __init__(self, allowed_tables: Optional[Set[str]] = None):
+        self.allowed_tables = set(allowed_tables or [])
 
-    def can_access(self, table: str) -> AccessDecision:
-        if not table:
-            return AccessDecision(allowed=False, reason="No table provided")
-        if not self.allowed_tables:
-            # If you want to *require* ACLs, flip this to deny by default.
-            return AccessDecision(allowed=True, reason="No ACL list configured; allowing by default")
-        if table in self.allowed_tables:
-            return AccessDecision(allowed=True, reason="Table is in user's allowed set")
-        return AccessDecision(allowed=False, reason="Table is not in user's allowed set")
+    def validate(self, sql: str) -> SqlValidationResult:
+        sql = (sql or "").strip()
+        if not sql:
+            return SqlValidationResult(ok=False, reason="Empty SQL")
 
+        # Reject multiple statements early
+        # sqlglot can parse multiple statements; we enforce exactly one.
+        try:
+            statements = sqlglot.parse(sql, read="postgres")
+        except Exception as e:
+            return SqlValidationResult(ok=False, reason=f"SQL parse failed: {e}")
+
+        if len(statements) != 1:
+            return SqlValidationResult(ok=False, reason="Only a single SQL statement is allowed")
+
+        stmt = statements[0]
+
+        # Enforce statement type: allow SELECT and WITH (CTE)
+        if not isinstance(stmt, (exp.Select, exp.With, exp.Union, exp.Paren)):
+            # Some SELECT forms parse as Union/Paren; we’ll still validate content below
+            pass
+
+        # Hard keyword deny-list check (defense-in-depth)
+        upper_sql = sql.upper()
+        for kw in DISALLOWED_KEYWORDS:
+            if kw in upper_sql:
+                return SqlValidationResult(ok=False, reason=f"Disallowed keyword detected: {kw}")
+
+        # Ensure the AST contains a SELECT somewhere as the "main" action
+        if not stmt.find(exp.Select):
+            return SqlValidationResult(ok=False, reason="Only SELECT queries are allowed")
+
+        # Extract referenced tables from AST
+        tables = []
+        for t in stmt.find_all(exp.Table):
+            # exp.Table.this might contain table name, exp.Table.db schema
+            name = t.name
+            schema = (t.db or "").strip()
+            if schema:
+                tables.append(f"{schema}.{name}")
+            else:
+                # If schema missing, keep as name; your policy can reject schema-less refs
+                tables.append(name)
+
+        unique_tables = tuple(sorted(set(tables)))
+
+        # If allowed_tables configured: enforce all referenced tables are in allowed set.
+        if self.allowed_tables:
+            # Strict mode: schema.table must match exactly
+            for tbl in unique_tables:
+                if tbl not in self.allowed_tables:
+                    return SqlValidationResult(
+                        ok=False,
+                        reason=f"SQL references non-allowed table: {tbl}",
+                        referenced_tables=unique_tables,
+                    )
+
+        return SqlValidationResult(ok=True, reason="OK", referenced_tables=unique_tables)
