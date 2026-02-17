@@ -1,98 +1,81 @@
-pip install sqlglot psycopg[binary] psycopg_pool
-
--------------
-
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set
 
-import sqlglot
-from sqlglot import exp
+from psycopg_pool import ConnectionPool
+from psycopg.rows import dict_row
 
-
-DISALLOWED_KEYWORDS = {
-    "INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT",
-    "CREATE", "ALTER", "DROP", "TRUNCATE",
-    "GRANT", "REVOKE",
-    "COPY", "CALL", "DO", "EXECUTE",
-    "SET", "RESET",
-}
+from src.tools.sql.readonly_validator import ReadOnlySqlValidator, SqlValidationResult
 
 
 @dataclass(frozen=True)
-class SqlValidationResult:
-    ok: bool
-    reason: str
-    referenced_tables: Tuple[str, ...] = ()
+class QueryResult:
+    columns: Sequence[str]
+    rows: List[Dict[str, Any]]
+    validation: SqlValidationResult
 
 
-class ReadOnlySqlValidator:
+class SafePostgresReadOnlyExecutor:
     """
-    Validates that SQL is:
-      - single statement
-      - read-only (SELECT or WITH ... SELECT)
-      - references only allowed tables (optional)
+    A hardened execution layer:
+      - Validates SQL (read-only, single statement, allowed tables)
+      - Runs with transaction_read_only=on
+      - Applies statement timeout and row limit
+      - Uses pooling
     """
 
-    def __init__(self, allowed_tables: Optional[Set[str]] = None):
-        self.allowed_tables = set(allowed_tables or [])
+    def __init__(
+        self,
+        dsn: str,
+        allowed_tables: Optional[Set[str]] = None,
+        statement_timeout_ms: int = 15_000,
+        max_rows: int = 200,
+        pool_min_size: int = 1,
+        pool_max_size: int = 5,
+    ):
+        self._pool = ConnectionPool(
+            conninfo=dsn,
+            min_size=pool_min_size,
+            max_size=pool_max_size,
+            kwargs={"row_factory": dict_row},
+        )
+        self._validator = ReadOnlySqlValidator(allowed_tables=allowed_tables or set())
+        self._timeout_ms = int(statement_timeout_ms)
+        self._max_rows = int(max_rows)
 
-    def validate(self, sql: str) -> SqlValidationResult:
-        sql = (sql or "").strip()
-        if not sql:
-            return SqlValidationResult(ok=False, reason="Empty SQL")
+    def close(self) -> None:
+        self._pool.close()
 
-        # Reject multiple statements early
-        # sqlglot can parse multiple statements; we enforce exactly one.
-        try:
-            statements = sqlglot.parse(sql, read="postgres")
-        except Exception as e:
-            return SqlValidationResult(ok=False, reason=f"SQL parse failed: {e}")
+    def run(self, sql: str) -> QueryResult:
+        validation = self._validator.validate(sql)
+        if not validation.ok:
+            return QueryResult(columns=(), rows=[], validation=validation)
 
-        if len(statements) != 1:
-            return SqlValidationResult(ok=False, reason="Only a single SQL statement is allowed")
+        # Enforce a hard row cap if not already present:
+        # This is conservative: append LIMIT if the query doesn't have one.
+        sql_limited = self._ensure_limit(sql, self._max_rows)
 
-        stmt = statements[0]
+        with self._pool.connection() as conn:
+            # Per-transaction settings
+            with conn.cursor() as cur:
+                cur.execute("BEGIN;")
+                # Absolute safety: read-only transaction + timeout
+                cur.execute("SET LOCAL transaction_read_only = on;")
+                cur.execute(f"SET LOCAL statement_timeout = {self._timeout_ms};")
 
-        # Enforce statement type: allow SELECT and WITH (CTE)
-        if not isinstance(stmt, (exp.Select, exp.With, exp.Union, exp.Paren)):
-            # Some SELECT forms parse as Union/Paren; we’ll still validate content below
-            pass
+                cur.execute(sql_limited)
+                rows = cur.fetchall()
+                cols = [d.name for d in cur.description] if cur.description else []
+                cur.execute("ROLLBACK;")
 
-        # Hard keyword deny-list check (defense-in-depth)
-        upper_sql = sql.upper()
-        for kw in DISALLOWED_KEYWORDS:
-            if kw in upper_sql:
-                return SqlValidationResult(ok=False, reason=f"Disallowed keyword detected: {kw}")
+        return QueryResult(columns=cols, rows=rows, validation=validation)
 
-        # Ensure the AST contains a SELECT somewhere as the "main" action
-        if not stmt.find(exp.Select):
-            return SqlValidationResult(ok=False, reason="Only SELECT queries are allowed")
-
-        # Extract referenced tables from AST
-        tables = []
-        for t in stmt.find_all(exp.Table):
-            # exp.Table.this might contain table name, exp.Table.db schema
-            name = t.name
-            schema = (t.db or "").strip()
-            if schema:
-                tables.append(f"{schema}.{name}")
-            else:
-                # If schema missing, keep as name; your policy can reject schema-less refs
-                tables.append(name)
-
-        unique_tables = tuple(sorted(set(tables)))
-
-        # If allowed_tables configured: enforce all referenced tables are in allowed set.
-        if self.allowed_tables:
-            # Strict mode: schema.table must match exactly
-            for tbl in unique_tables:
-                if tbl not in self.allowed_tables:
-                    return SqlValidationResult(
-                        ok=False,
-                        reason=f"SQL references non-allowed table: {tbl}",
-                        referenced_tables=unique_tables,
-                    )
-
-        return SqlValidationResult(ok=True, reason="OK", referenced_tables=unique_tables)
+    @staticmethod
+    def _ensure_limit(sql: str, max_rows: int) -> str:
+        upper = sql.upper()
+        if " LIMIT " in upper:
+            return sql
+        # Avoid breaking trailing semicolons
+        s = sql.rstrip().rstrip(";")
+        return f"{s} LIMIT {max_rows};"
