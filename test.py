@@ -1,81 +1,82 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Set
+from typing import Optional, Sequence, Set
 
-from psycopg_pool import ConnectionPool
-from psycopg.rows import dict_row
-
-from src.tools.sql.readonly_validator import ReadOnlySqlValidator, SqlValidationResult
+from src.api.orchestration.prompt_resolver import PromptResolver, ResolvedPrompt
+from src.api.orchestration.agent_router import AgentRouter, RouteDecision
+from src.api.orchestration.access_control import TableAccessController, AccessDecision
 
 
 @dataclass(frozen=True)
-class QueryResult:
-    columns: Sequence[str]
-    rows: List[Dict[str, Any]]
-    validation: SqlValidationResult
+class OrchestrationOutput:
+    agent_name: str
+    final_message_for_agent: str
+    selected_table: Optional[str]
+    route_reason: str
 
 
-class SafePostgresReadOnlyExecutor:
+class Orchestrator:
     """
-    A hardened execution layer:
-      - Validates SQL (read-only, single statement, allowed tables)
-      - Runs with transaction_read_only=on
-      - Applies statement timeout and row limit
-      - Uses pooling
+    Orchestration for Part 1:
+      - Parse table from message
+      - Enforce user access to that table
+      - Select agent
+      - Augment prompt with structured context (table binding)
     """
 
-    def __init__(
+    def __init__(self, router: AgentRouter):
+        self._resolver = PromptResolver()
+        self._router = router
+
+    def orchestrate(
         self,
-        dsn: str,
+        message: str,
         allowed_tables: Optional[Set[str]] = None,
-        statement_timeout_ms: int = 15_000,
-        max_rows: int = 200,
-        pool_min_size: int = 1,
-        pool_max_size: int = 5,
-    ):
-        self._pool = ConnectionPool(
-            conninfo=dsn,
-            min_size=pool_min_size,
-            max_size=pool_max_size,
-            kwargs={"row_factory": dict_row},
+    ) -> OrchestrationOutput:
+        resolved: ResolvedPrompt = self._resolver.resolve(message)
+
+        if not resolved.table:
+            # No table chosen → agent can respond telling user to select a table
+            decision: RouteDecision = self._router.route(table=None)
+            return OrchestrationOutput(
+                agent_name=decision.agent_name,
+                final_message_for_agent=resolved.user_prompt,
+                selected_table=None,
+                route_reason=decision.reason,
+            )
+
+        acl = TableAccessController(allowed_tables=allowed_tables or set())
+        access: AccessDecision = acl.can_access(resolved.table)
+        if not access.allowed:
+            # We do NOT change API schema; we just ensure the agent returns a clear refusal.
+            decision = self._router.route(resolved.table)
+            refusal = (
+                f"You do not have access to table '{resolved.table}'. "
+                f"Please choose a table you have access to."
+            )
+            return OrchestrationOutput(
+                agent_name=decision.agent_name,
+                final_message_for_agent=refusal,
+                selected_table=resolved.table,
+                route_reason=f"Denied: {access.reason}",
+            )
+
+        decision = self._router.route(resolved.table)
+
+        # Provide structured context to agent (internal only)
+        # This does NOT change /api/chat contract; it only changes what agents see.
+        # Keep it concise and machine-readable.
+        final_msg = (
+            f"[CONTEXT]\n"
+            f"selected_table={resolved.table}\n"
+            f"[/CONTEXT]\n\n"
+            f"{resolved.user_prompt}"
         )
-        self._validator = ReadOnlySqlValidator(allowed_tables=allowed_tables or set())
-        self._timeout_ms = int(statement_timeout_ms)
-        self._max_rows = int(max_rows)
 
-    def close(self) -> None:
-        self._pool.close()
-
-    def run(self, sql: str) -> QueryResult:
-        validation = self._validator.validate(sql)
-        if not validation.ok:
-            return QueryResult(columns=(), rows=[], validation=validation)
-
-        # Enforce a hard row cap if not already present:
-        # This is conservative: append LIMIT if the query doesn't have one.
-        sql_limited = self._ensure_limit(sql, self._max_rows)
-
-        with self._pool.connection() as conn:
-            # Per-transaction settings
-            with conn.cursor() as cur:
-                cur.execute("BEGIN;")
-                # Absolute safety: read-only transaction + timeout
-                cur.execute("SET LOCAL transaction_read_only = on;")
-                cur.execute(f"SET LOCAL statement_timeout = {self._timeout_ms};")
-
-                cur.execute(sql_limited)
-                rows = cur.fetchall()
-                cols = [d.name for d in cur.description] if cur.description else []
-                cur.execute("ROLLBACK;")
-
-        return QueryResult(columns=cols, rows=rows, validation=validation)
-
-    @staticmethod
-    def _ensure_limit(sql: str, max_rows: int) -> str:
-        upper = sql.upper()
-        if " LIMIT " in upper:
-            return sql
-        # Avoid breaking trailing semicolons
-        s = sql.rstrip().rstrip(";")
-        return f"{s} LIMIT {max_rows};"
+        return OrchestrationOutput(
+            agent_name=decision.agent_name,
+            final_message_for_agent=final_msg,
+            selected_table=resolved.table,
+            route_reason=decision.reason,
+        )
