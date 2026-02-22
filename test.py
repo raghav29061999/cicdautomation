@@ -1,88 +1,165 @@
-from __future__ import annotations
-
-import time
-import uuid
-from dataclasses import dataclass, asdict
-from typing import Any, Dict, List, Optional
-
-
-@dataclass
-class Event:
-    event_id: str
-    ts_ms: int
-    type: str
-    session_id: str
-    payload: Dict[str, Any]
-
-
-class InMemoryEventStore:
+def _extract_structured_output(out: Any) -> Optional[Dict[str, Any]]:
     """
-    Minimal in-memory store.
-    Good enough to power dashboard/insights early.
-    Replace later with DB/Redis.
+    Agno-native path: if output_schema is used, Agno returns a typed Pydantic object
+    (often in out.content on newer docs), or may expose it via structured_output depending on version.
 
-    Added:
-      - session-scoped KV for orchestration state (e.g., selected_table)
+    We handle both without breaking.
     """
+    if out is None:
+        return None
 
-    def __init__(self, max_events: int = 5000) -> None:
-        self.max_events = max_events
-        self._events: List[Event] = []
-        # Session-scoped context, e.g. {"session_id": {"selected_table": "public.orders"}}
-        self._session_kv: Dict[str, Dict[str, Any]] = {}
+    # Newer docs: structured output is returned as a typed object in response.content :contentReference[oaicite:4]{index=4}
+    content = getattr(out, "content", None)
+    if content is not None:
+        if isinstance(content, dict):
+            return content
+        if hasattr(content, "model_dump"):
+            try:
+                return content.model_dump()
+            except Exception:
+                pass
 
-    def add(self, type: str, session_id: Optional[str], payload: Dict[str, Any]) -> Event:
-        ev = Event(
-            event_id=str(uuid.uuid4()),
-            ts_ms=int(time.time() * 1000),
-            type=type,
-            session_id=session_id or "default",
-            payload=payload,
-        )
-        self._events.append(ev)
-        if len(self._events) > self.max_events:
-            self._events = self._events[-self.max_events :]
-        return ev
+    # Some versions expose it explicitly
+    so = getattr(out, "structured_output", None)
+    if so is not None:
+        if isinstance(so, dict):
+            return so
+        if hasattr(so, "model_dump"):
+            try:
+                return so.model_dump()
+            except Exception:
+                pass
 
-    def list(self, limit: int = 200) -> List[Dict[str, Any]]:
-        return [asdict(e) for e in self._events[-limit:]]
+    return None
 
-    def count(self) -> int:
-        return len(self._events)
 
-    def counts_by_type(self) -> Dict[str, int]:
-        out: Dict[str, int] = {}
-        for e in self._events:
-            out[e.type] = out.get(e.type, 0) + 1
-        return out
 
-    # ---------------------------
-    # NEW: session context helpers
-    # ---------------------------
 
-    def set_session_value(self, session_id: str, key: str, value: Any) -> None:
-        """
-        Store session-scoped orchestration state (in-memory).
-        This does NOT change any existing behavior.
-        """
-        sid = session_id or "default"
-        if sid not in self._session_kv:
-            self._session_kv[sid] = {}
-        self._session_kv[sid][key] = value
 
-        # Optional: store an event for observability/debugging
-        self.add(
-            type="session_context_set",
-            session_id=sid,
-            payload={"key": key, "value": value},
-        )
 
-    def get_session_value(self, session_id: str, key: str, default: Any = None) -> Any:
-        sid = session_id or "default"
-        return self._session_kv.get(sid, {}).get(key, default)
 
-    def clear_session(self, session_id: str) -> None:
-        sid = session_id or "default"
-        if sid in self._session_kv:
-            del self._session_kv[sid]
-        self.add(type="session_context_cleared", session_id=sid, payload={})
+
+
+-----------------
+
+
+
+
+
+
+
+
+
+
+
+def _extract_json_fence(text: str) -> Optional[Dict[str, Any]]:
+    """
+    If reply contains a fenced JSON block:
+      ```json
+      {...}
+      ```
+    extract and parse it.
+    """
+    if not text:
+        return None
+
+    s = text.strip()
+    marker = "```json"
+    if marker not in s:
+        return None
+
+    try:
+        start = s.index(marker) + len(marker)
+        end = s.index("```", start)
+        blob = s[start:end].strip()
+        obj = json.loads(blob)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+------------------------------
+
+out = team.run(
+    input=final_prompt,
+    session_id=session_id,
+    output_schema=ChatStructuredOutput,  # ✅ Agno structured output :contentReference[oaicite:5]{index=5}
+)
+
+# When output_schema is used, `out.content` may now be a typed object.
+structured = _extract_structured_output(out)
+
+# Build reply + graph_json from structured output if present
+reply = ""
+graph_json = None
+
+if structured:
+    reply = str(structured.get("reply_text", "")) if isinstance(structured, dict) else str(structured)
+    graph_json = structured.get("graph_json") if isinstance(structured, dict) else None
+else:
+    # Fallback to plain text
+    reply = _extract_team_content(out)
+    # Fallback extraction if graph is embedded as ```json ... ```
+    graph_json = _extract_json_fence(reply)
+
+agent_used = extract_agent_used(out)
+
+# This is what we return to UI
+structured_output = {"reply_text": reply, "graph_json": graph_json} if (reply or graph_json) else None
+
+----------------------------
+
+out = team.run(
+    input=final_prompt,
+    session_id=session_id,
+    output_schema=ChatStructuredOutput,  # ✅ Agno structured output :contentReference[oaicite:5]{index=5}
+)
+
+# When output_schema is used, `out.content` may now be a typed object.
+structured = _extract_structured_output(out)
+
+# Build reply + graph_json from structured output if present
+reply = ""
+graph_json = None
+
+if structured:
+    reply = str(structured.get("reply_text", "")) if isinstance(structured, dict) else str(structured)
+    graph_json = structured.get("graph_json") if isinstance(structured, dict) else None
+else:
+    # Fallback to plain text
+    reply = _extract_team_content(out)
+    # Fallback extraction if graph is embedded as ```json ... ```
+    graph_json = _extract_json_fence(reply)
+
+agent_used = extract_agent_used(out)
+
+# This is what we return to UI
+structured_output = {"reply_text": reply, "graph_json": graph_json} if (reply or graph_json) else None
+
+-----------------------
+
+store.add(
+    type="chat_response",
+    session_id=session_id,
+    payload={
+        "agent_used": agent_used,
+        "reply": reply,
+        "structured_output": structured_output,
+        "table_name": selected_table,
+    },
+)
+
+----------------------
+
+
+return ChatResponse(
+    session_id=session_id,
+    agent_used=agent_used,
+    reply=reply,
+    structured_output=structured_output,
+    raw={
+        "selected_table": selected_table,
+        "metadata": metadata,
+    },
+)
+-----------
+
