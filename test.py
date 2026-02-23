@@ -1,91 +1,36 @@
-def run_query(self, query: str) -> str:
-    h = _sql_hash(query)
-    preview = _sql_preview(query)
+flowchart LR
+    %% Styling
+    classDef api fill:#E3F2FD,stroke:#1E88E5,stroke-width:2px,color:#0D47A1
+    classDef orchestrator fill:#E8F5E9,stroke:#43A047,stroke-width:2px,color:#1B5E20
+    classDef agent fill:#FFF3E0,stroke:#FB8C00,stroke-width:2px,color:#E65100
+    classDef tool fill:#F3E5F5,stroke:#8E24AA,stroke-width:2px,color:#4A148C
+    classDef db fill:#ECEFF1,stroke:#455A64,stroke-width:2px,color:#263238
+    classDef audit fill:#FFEBEE,stroke:#E53935,stroke-width:2px,color:#B71C1C
 
-    err = validate_read_only_sql(query)
-    if err:
-        # AUDIT: denied
-        log_error(
-            f"SQL_AUDIT decision=deny tool=postgres_tools op=run_query "
-            f"sql_hash={h} reason={err} preview='{preview}'"
-        )
-        log_debug(f"Rejected SQL full_text sql_hash={h}: {query}")
-        return f"ERROR: Read-only SQL policy violation. {err}"
+    %% User Layer
+    U[User / Swagger UI] --> API[/FastAPI Chat Endpoint/]
+    class API api
 
-    # AUDIT: allowed (start)
-    log_debug(
-        f"SQL_AUDIT decision=allow tool=postgres_tools op=run_query "
-        f"sql_hash={h} preview='{preview}'"
-    )
+    %% Orchestration Layer
+    API --> TEAM[Agno Team Orchestrator\n(mode = route)]
+    class TEAM orchestrator
 
-    t0 = time.perf_counter()
-    result = super().run_query(query)
-    dt_ms = int((time.perf_counter() - t0) * 1000)
+    %% Agents
+    TEAM --> A1[Agent 1\n(General Query Agent)]
+    TEAM --> A2[Agent 2\n(Analytics Agent)]
+    TEAM --> A3[Agent 3\n(Data Integrity Agent)]
+    class A1,A2,A3 agent
 
-    # Heuristic: PostgresTools returns "Error executing query:" on DB errors
-    is_error = isinstance(result, str) and result.lower().startswith("error executing query:")
+    %% Tool Layer
+    A1 --> TOOL[SafePostgresTools\n(Read-Only Enforced)]
+    A2 --> TOOL
+    A3 --> TOOL
+    class TOOL tool
 
-    # AUDIT: finished
-    if is_error:
-        log_error(
-            f"SQL_AUDIT decision=done tool=postgres_tools op=run_query "
-            f"sql_hash={h} latency_ms={dt_ms} status=error"
-        )
-    else:
-        log_debug(
-            f"SQL_AUDIT decision=done tool=postgres_tools op=run_query "
-            f"sql_hash={h} latency_ms={dt_ms} status=ok"
-        )
+    %% DB Layer
+    TOOL --> DB[(PostgreSQL\nRead-Only Role)]
+    class DB db
 
-    return result
-
-
-
-
-----------------------
-
-
-def inspect_query(self, query: str) -> str:
-    h = _sql_hash(query)
-    preview = _sql_preview(query)
-
-    err = validate_read_only_sql(query)
-    if err:
-        log_error(
-            f"SQL_AUDIT decision=deny tool=postgres_tools op=inspect_query "
-            f"sql_hash={h} reason={err} preview='{preview}'"
-        )
-        log_debug(f"Rejected SQL full_text (inspect) sql_hash={h}: {query}")
-        return f"ERROR: Read-only SQL policy violation. {err}"
-
-    log_debug(
-        f"SQL_AUDIT decision=allow tool=postgres_tools op=inspect_query "
-        f"sql_hash={h} preview='{preview}'"
-    )
-
-    t0 = time.perf_counter()
-    result = super().inspect_query(query)
-    dt_ms = int((time.perf_counter() - t0) * 1000)
-
-    is_error = isinstance(result, str) and result.lower().startswith("error executing query:")
-
-    if is_error:
-        log_error(
-            f"SQL_AUDIT decision=done tool=postgres_tools op=inspect_query "
-            f"sql_hash={h} latency_ms={dt_ms} status=error"
-        )
-    else:
-        log_debug(
-            f"SQL_AUDIT decision=done tool=postgres_tools op=inspect_query "
-            f"sql_hash={h} latency_ms={dt_ms} status=ok"
-        )
-
-    return result
-
-
-
-
-
-
-
-
+    %% Audit
+    TOOL --> AUDIT[SQL Audit Logger\n(Console Structured Logs)]
+    class AUDIT audit
