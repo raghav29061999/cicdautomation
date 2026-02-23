@@ -1,255 +1,162 @@
-# src/api/routes/chat.py
 from __future__ import annotations
 
-import json
-import logging
 import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from agno.team import Team
-
-from src.api.deps import get_store, get_team
-from src.api.models import ChatRequest, ChatResponse
-from src.api.store import InMemoryEventStore
-from src.api.orchestrator_team import extract_agent_used
-
-log = logging.getLogger("api.chat")
-router = APIRouter(prefix="/api", tags=["chat"])
+from agno.tools.postgres import PostgresTools
+from agno.utils.log import log_debug, log_error
 
 
-# Matches:
-# ```json
-# {...}
-# ```
-# or
-# ```echarts
-# {...}
-# ```
-_FENCE_RE = re.compile(r"```(?:json|echarts)\s*([\s\S]*?)\s*```", re.IGNORECASE)
+# Keywords / patterns we never want to allow in "read-only" mode.
+# Notes:
+# - We block SELECT INTO explicitly (Postgres writes a new table)
+# - We block COPY, CALL, DO, EXECUTE (can run server-side code / write)
+# - We block DDL/DML and privilege changes
+# - We block transaction control to avoid oddities (optional; safe default)
+_FORBIDDEN_KEYWORDS = (
+    "insert", "update", "delete", "merge", "upsert",
+    "create", "alter", "drop", "truncate",
+    "copy", "call", "do", "execute",
+    "grant", "revoke",
+    "vacuum", "analyze",
+    "refresh",  # materialized view refresh can be write-ish
+    "set", "reset",  # optional; remove if you need SET LOCAL, etc.
+    "begin", "commit", "rollback", "savepoint", "release",
+)
+
+# Basic: must begin with SELECT or WITH
+_ALLOWED_START = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)
+
+# Detect SELECT INTO (write)
+_SELECT_INTO = re.compile(r"\bselect\b[\s\S]*?\binto\b", re.IGNORECASE)
+
+# Word-boundary keyword matcher (applied after stripping comments/strings)
+_FORBIDDEN_RE = re.compile(
+    r"\b(" + "|".join(re.escape(k) for k in _FORBIDDEN_KEYWORDS) + r")\b",
+    re.IGNORECASE,
+)
 
 
-def _inject_context(user_query: str, selected_table: Optional[str]) -> str:
-    if not selected_table:
-        return user_query
-    return (
-        "[CONTEXT]\n"
-        f"selected_table={selected_table}\n"
-        "[/CONTEXT]\n\n"
-        f"{user_query}"
-    )
-
-
-def _safe_str(x: Any) -> str:
-    try:
-        return "" if x is None else str(x)
-    except Exception:
-        return ""
-
-
-def _extract_text_from_any(out: Any) -> str:
+def _strip_sql_comments_and_strings(sql: str) -> str:
     """
-    Robust extraction across Agno versions and different return shapes.
-    Goal: return the best human-readable text we can find.
+    Remove:
+      - single-line comments: -- ...
+      - block comments: /* ... */
+      - single-quoted strings: '...'
+      - dollar-quoted strings: $$...$$ or $tag$...$tag$
+
+    Goal: keyword scanning should ignore content inside strings/comments.
+    This is not a full SQL parser, but it's robust enough for enforcement.
     """
-    if out is None:
-        return ""
+    s = sql or ""
 
-    # 1) Common: out.content
-    if hasattr(out, "content"):
-        c = getattr(out, "content", None)
-        if isinstance(c, str) and c.strip():
-            return c
-        if isinstance(c, dict):
-            # Try typical keys
-            for k in ("reply", "text", "message", "output", "content"):
-                v = c.get(k)
-                if isinstance(v, str) and v.strip():
-                    return v
-            # If dict only, stringify it (so reply isn't empty)
-            return json.dumps(c, ensure_ascii=False)
+    # Remove block comments
+    s = re.sub(r"/\*[\s\S]*?\*/", " ", s)
 
-        if c is not None:
-            s = _safe_str(c)
-            if s.strip():
-                return s
+    # Remove single-line comments
+    s = re.sub(r"--[^\n]*", " ", s)
 
-    # 2) Other common attributes
-    for attr in ("output", "text", "message", "reply"):
-        if hasattr(out, attr):
-            v = getattr(out, attr, None)
-            if isinstance(v, str) and v.strip():
-                return v
+    # Remove dollar-quoted strings: $tag$ ... $tag$
+    # This handles $$...$$ too (tag can be empty).
+    def _dq_replacer(match: re.Match) -> str:
+        return " "
 
-    # 3) messages list patterns
-    if hasattr(out, "messages"):
-        msgs = getattr(out, "messages", None)
-        if isinstance(msgs, list) and msgs:
-            last = msgs[-1]
-            if isinstance(last, str) and last.strip():
-                return last
-            if isinstance(last, dict):
-                for k in ("content", "text", "message"):
-                    v = last.get(k)
-                    if isinstance(v, str) and v.strip():
-                        return v
-                # stringify dict message
-                return json.dumps(last, ensure_ascii=False)
-            s = _safe_str(last)
-            if s.strip():
-                return s
+    s = re.sub(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$[\s\S]*?\$\1\$", _dq_replacer, s)
 
-    # 4) Last resort: stringify the whole object
-    s = _safe_str(out)
+    # Remove single-quoted strings (handles escaped '' inside)
+    s = re.sub(r"'([^']|'')*'", " ", s)
+
     return s
 
 
-def _extract_graph_from_fence(text: str) -> Tuple[str, Optional[str]]:
+def _has_multiple_statements(sql: str) -> bool:
     """
-    Extract JSON from a fenced block (```json or ```echarts).
+    Disallow multi-statement queries.
+    We treat any semicolon that isn't just a trailing terminator as suspicious.
+    """
+    s = (sql or "").strip()
+    if not s:
+        return False
+
+    # Remove trailing semicolons/spaces
+    s2 = re.sub(r"[;\s]+$", "", s)
+
+    # Any remaining semicolon means multiple statements or statement chaining
+    return ";" in s2
+
+
+def validate_read_only_sql(sql: str) -> Optional[str]:
+    """
     Returns:
-      clean_text: text with the fenced block removed
-      graph_json_str: JSON string (not dict) or None
+      None if SQL is allowed
+      error_message string if rejected
     """
-    if not text or not text.strip():
-        return text, None
+    raw = (sql or "").strip()
+    if not raw:
+        return "Empty SQL is not allowed."
 
-    m = _FENCE_RE.search(text)
-    if not m:
-        return text, None
+    if not _ALLOWED_START.match(raw):
+        return "Only read-only SELECT/WITH queries are allowed."
 
-    blob = (m.group(1) or "").strip()
-    if not blob:
-        return _FENCE_RE.sub("", text).strip(), None
+    # Strip strings/comments for keyword checks
+    cleaned = _strip_sql_comments_and_strings(raw)
 
-    # Try to validate JSON; if it isn't clean JSON, try to locate first {...} or [...]
-    candidate = blob
-    try:
-        json.loads(candidate)
-    except Exception:
-        m2 = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", blob)
-        if m2:
-            candidate = m2.group(1).strip()
-            try:
-                json.loads(candidate)
-            except Exception:
-                # Still return raw blob as string; better than losing it
-                candidate = blob
+    # Disallow multiple statements
+    if _has_multiple_statements(cleaned):
+        return "Multiple SQL statements are not allowed."
 
-    clean_text = _FENCE_RE.sub("", text).strip()
-    return clean_text, candidate
+    # Disallow SELECT INTO
+    if _SELECT_INTO.search(cleaned):
+        return "SELECT INTO is not allowed (it writes a table)."
+
+    # Disallow forbidden keywords
+    m = _FORBIDDEN_RE.search(cleaned)
+    if m:
+        return f"Forbidden operation detected: '{m.group(1)}'"
+
+    return None
 
 
-@router.post("/chat", response_model=ChatResponse)
-def chat(
-    req: ChatRequest,
-    team: Team = Depends(get_team),
-    store: InMemoryEventStore = Depends(get_store),
-) -> ChatResponse:
-    session_id = req.session_id or "default"
-    metadata: Dict[str, Any] = req.metadata or {}
+class SafePostgresTools(PostgresTools):
+    """
+    Agno-native, production-safe PostgresTools:
+    - Does NOT modify agno.tools.postgres.PostgresTools
+    - Overrides only the entrypoints that accept arbitrary SQL from LLM/user
+    """
 
-    table_name = (req.table_name or "").strip() if req.table_name else None
-    user_query = (req.user_query or "").strip() if req.user_query else None
+    def run_query(self, query: str) -> str:
+        err = validate_read_only_sql(query)
+        if err:
+            log_error(f"Read-only SQL policy violation: {err}")
+            log_debug(f"Rejected SQL: {query}")
+            return f"ERROR: Read-only SQL policy violation. {err}"
 
-    # Backward compatibility: message (deprecated)
-    if not (table_name and user_query):
-        if req.message:
-            store.add(
-                type="chat_request_legacy",
-                session_id=session_id,
-                payload={"message": req.message, "metadata": metadata},
-            )
-            raise HTTPException(
-                status_code=400,
-                detail="Legacy request detected. Please use: table_name + user_query (+ session_id).",
-            )
-        raise HTTPException(status_code=400, detail="Provide table_name and user_query")
+        return super().run_query(query)
 
-    # Session-scoped table binding
-    store.set_session_value(session_id, "selected_table", table_name)
-    selected_table = store.get_session_value(session_id, "selected_table", None)
+    def inspect_query(self, query: str) -> str:
+        """
+        EXPLAIN is read-only, but we still validate the underlying query,
+        because EXPLAIN <dangerous statement> can still be problematic.
+        """
+        err = validate_read_only_sql(query)
+        if err:
+            log_error(f"Read-only SQL policy violation (inspect): {err}")
+            log_debug(f"Rejected SQL (inspect): {query}")
+            return f"ERROR: Read-only SQL policy violation. {err}"
 
-    if not selected_table:
-        guidance = (
-            "No table is selected for this session. Please send a table_name.\n"
-            "Example: table_name=public.orders, user_query='show top 5 orders'"
-        )
-        store.add(type="chat_response", session_id=session_id, payload={"agent_used": "none", "reply": guidance})
-        return ChatResponse(session_id=session_id, agent_used="none", reply=guidance, structured_output=None, raw={})
+        return super().inspect_query(query)
 
-    final_prompt = _inject_context(user_query, selected_table)
+-------------------------------------------------------------------------------------------
 
-    store.add(
-        type="chat_request",
-        session_id=session_id,
-        payload={"table_name": selected_table, "user_query": user_query, "metadata": metadata},
+from src.tools.safe_postgres_tools import SafePostgresTools
+
+def get_postgrestools():
+    return SafePostgresTools(
+        host=...,
+        port=...,
+        db_name=...,
+        user=...,
+        password=...,
+        # keep your schema if you pass it
+        table_schema="public",
     )
-
-    try:
-        out = team.run(input=final_prompt, session_id=session_id)
-        agent_used = extract_agent_used(out)
-
-        # 1) Extract the best possible text
-        raw_text = _extract_text_from_any(out)
-
-        # 2) Pull out graph JSON if present (```echarts / ```json)
-        clean_text, graph_json_str = _extract_graph_from_fence(raw_text)
-
-        # 3) Ensure reply is not empty
-        reply = clean_text.strip()
-        if not reply:
-            # If the model returned only a graph block, give a fallback message
-            if graph_json_str:
-                reply = "Generated chart JSON."
-            else:
-                # Truly empty: still return something for Swagger/debug
-                reply = raw_text.strip() or "No response text returned."
-
-        structured_output = None
-        if graph_json_str and graph_json_str.strip():
-            structured_output = {"graph_json": graph_json_str}
-
-        # Helpful console logs while testing in Swagger
-        log.info(
-            "Orchestration | session=%s | table=%s | agent_used=%s | has_graph=%s | reply_len=%s",
-            session_id,
-            selected_table,
-            agent_used,
-            bool(structured_output),
-            len(reply),
-        )
-
-        # Store full debug info for later dashboard/insights
-        store.add(
-            type="chat_response",
-            session_id=session_id,
-            payload={
-                "agent_used": agent_used,
-                "reply": reply,
-                "structured_output": structured_output,
-                "table_name": selected_table,
-                # Keep the raw extracted text for debugging
-                "raw_text": raw_text,
-            },
-        )
-
-        return ChatResponse(
-            session_id=session_id,
-            agent_used=agent_used or "unknown",
-            reply=reply,
-            structured_output=structured_output,
-            raw={
-                "selected_table": selected_table,
-                "metadata": metadata,
-            },
-        )
-
-    except Exception as e:
-        log.exception("Team execution failed")
-        store.add(
-            type="chat_error",
-            session_id=session_id,
-            payload={"error": str(e), "table_name": selected_table, "user_query": user_query},
-        )
-        raise HTTPException(status_code=500, detail=f"Orchestrator execution failed: {e}")
