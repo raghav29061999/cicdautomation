@@ -1,36 +1,54 @@
-instructions=[
-    "You are a Senior Business Analytics Expert generating executive-level insights.",
+from __future__ import annotations
 
-    "Your task is to generate high-value business insight prompts for a selected table.",
+from typing import Any, Dict, List, Optional, Union
+from pydantic import BaseModel, Field
 
-    "You MUST call the table schema first.",
 
-    "Step 1: Classify all columns into two categories:",
-    "- Business Columns (impact revenue, customers, products, performance, transactions, risk, operations)",
-    "- Technical Columns (ids, uuids, hashes, source_file, ingestion_time, created_at, updated_at, batch_id, metadata, system flags)",
+class DashboardKPI(BaseModel):
+    title: str = Field(..., description="KPI label shown on dashboard card")
+    value: Union[int, float, str] = Field(..., description="KPI value (number or text)")
+    unit: Optional[str] = Field(default=None, description="Optional unit, e.g. %, INR, USD")
+    note: Optional[str] = Field(default=None, description="Optional short note/explanation")
 
-    "Step 2: Completely IGNORE technical columns. Do not generate prompts about them.",
 
-    "Step 3: Rank business columns by potential business impact (revenue, growth, risk, volume, performance, segmentation).",
+class DashboardChart(BaseModel):
+    title: str = Field(..., description="Chart title")
+    echarts: Dict[str, Any] = Field(..., description="Apache ECharts option JSON")
+    note: Optional[str] = Field(default=None, description="Optional short note about the chart")
 
-    f"Step 4: Generate exactly {prompt_count} prompts using ONLY the highest-impact business columns.",
 
-    "Prompts must reflect real business decision-making questions.",
-    "Prompts should help stakeholders understand performance, trends, risks, segmentation, growth or anomalies.",
+class DashboardResponse(BaseModel):
+    table: str = Field(..., description="Selected table name, e.g. public.orders")
+    session_id: Optional[str] = Field(default=None, description="Echo session id if provided")
+    kpis: List[DashboardKPI] = Field(default_factory=list, description="Dashboard KPI cards")
+    charts: List[DashboardChart] = Field(default_factory=list, description="Dashboard charts")
+    notes: List[str] = Field(default_factory=list, description="Optional bullet insights for the dashboard")
+    raw: Dict[str, Any] = Field(default_factory=dict, description="Optional debug metadata")
 
-    "Prefer metrics like revenue, amount, cost, profit, price, quantity, status, region, category, customer, transaction_date, order_date.",
 
-    "Include visualization intent where meaningful (bar chart, line chart, pie chart, trend).",
+-------------------------------------------------------------------------------------------------------------
 
-    "DO NOT generate prompts about ingestion metadata or operational fields.",
-    "DO NOT generate SQL.",
-    "DO NOT answer the prompts.",
-    "Return ONLY valid JSON.",
-    "Do NOT wrap the output in markdown.",
+def init_api_dependencies(
+    *,
+    store: InMemoryEventStore,
+    team: Team,
+    insights_agent: Agent | None = None,
+    dashboard_agent: Agent | None = None,
+) -> None:
+    global _STORE, _TEAM, _INSIGHTS_AGENT, _DASHBOARD_AGENT
+    _STORE = store
+    _TEAM = team
 
-    "Output format MUST strictly be:",
-    "{",
-    '"table": "<table_name>",',
-    '"prompts": ["prompt_1", "prompt_2"]',
-    "}"
-]
+    if insights_agent is not None:
+        _INSIGHTS_AGENT = insights_agent
+
+    if dashboard_agent is not None:
+        _DASHBOARD_AGENT = dashboard_agent
+
+
+----------------------------------------------------------------------------------
+
+def get_dashboard_agent() -> Agent:
+    if _DASHBOARD_AGENT is None:
+        raise RuntimeError("Dashboard agent dependency not initialized")
+    return _DASHBOARD_AGENT
