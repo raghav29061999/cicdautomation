@@ -1,54 +1,156 @@
+# src/api/routes/dashboard.py
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Union
-from pydantic import BaseModel, Field
+import json
+from typing import Any, Dict, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+
+from agno.agent import Agent
+from agno.utils.log import log_debug, log_error
+
+from src.api.deps import get_dashboard_agent, get_store
+from src.api.models import DashboardResponse
+from src.api.store import InMemoryEventStore
+
+router = APIRouter(prefix="/api", tags=["dashboard"])
 
 
-class DashboardKPI(BaseModel):
-    title: str = Field(..., description="KPI label shown on dashboard card")
-    value: Union[int, float, str] = Field(..., description="KPI value (number or text)")
-    unit: Optional[str] = Field(default=None, description="Optional unit, e.g. %, INR, USD")
-    note: Optional[str] = Field(default=None, description="Optional short note/explanation")
+def _extract_content(out: Any) -> str:
+    if out is None:
+        return ""
+    if hasattr(out, "content"):
+        c = getattr(out, "content")
+        return "" if c is None else str(c)
+    return str(out)
 
 
-class DashboardChart(BaseModel):
-    title: str = Field(..., description="Chart title")
-    echarts: Dict[str, Any] = Field(..., description="Apache ECharts option JSON")
-    note: Optional[str] = Field(default=None, description="Optional short note about the chart")
+def _safe_json_loads(s: str) -> Dict[str, Any]:
+    """
+    Dashboard agent must return pure JSON.
+    Defensive stripping if markdown fences slip through.
+    """
+    raw = (s or "").strip()
+
+    # Strip fenced blocks like ```json ... ```
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        if lines:
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        raw = "\n".join(lines).strip()
+
+    if raw.lower().startswith("json"):
+        raw = raw[4:].strip()
+
+    obj = json.loads(raw)
+
+    if obj is None:
+        raise ValueError("Dashboard agent returned JSON null (expected an object).")
+    if not isinstance(obj, dict):
+        raise ValueError(f"Dashboard agent returned JSON type {type(obj).__name__} (expected object).")
+
+    return obj
 
 
-class DashboardResponse(BaseModel):
-    table: str = Field(..., description="Selected table name, e.g. public.orders")
-    session_id: Optional[str] = Field(default=None, description="Echo session id if provided")
-    kpis: List[DashboardKPI] = Field(default_factory=list, description="Dashboard KPI cards")
-    charts: List[DashboardChart] = Field(default_factory=list, description="Dashboard charts")
-    notes: List[str] = Field(default_factory=list, description="Optional bullet insights for the dashboard")
-    raw: Dict[str, Any] = Field(default_factory=dict, description="Optional debug metadata")
+@router.get("/dashboard", response_model=DashboardResponse)
+def get_dashboard(
+    request: Request,
+    table_name: str = Query(..., min_length=1, description="Selected table e.g. public.orders"),
+    session_id: Optional[str] = Query(default=None, description="Session id for stateful UX"),
+    store: InMemoryEventStore = Depends(get_store),
+    dashboard_agent: Agent = Depends(get_dashboard_agent),
+) -> Dict[str, Any]:
+    """
+    Returns a default dashboard JSON (KPIs + ECharts configs) for a selected table.
+    UI calls this when Dashboard tab is opened.
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+    sid = session_id or "default"
+    table = table_name.strip()
 
+    # Bind table to session (consistent with chat/insights)
+    store.set_session_value(sid, "selected_table", table)
 
--------------------------------------------------------------------------------------------------------------
+    log_debug(f"DASHBOARD request_start request_id={request_id} session_id={sid} table={table}")
 
-def init_api_dependencies(
-    *,
-    store: InMemoryEventStore,
-    team: Team,
-    insights_agent: Agent | None = None,
-    dashboard_agent: Agent | None = None,
-) -> None:
-    global _STORE, _TEAM, _INSIGHTS_AGENT, _DASHBOARD_AGENT
-    _STORE = store
-    _TEAM = team
+    store.add(
+        type="dashboard_request",
+        session_id=sid,
+        payload={"request_id": request_id, "table_name": table},
+    )
 
-    if insights_agent is not None:
-        _INSIGHTS_AGENT = insights_agent
+    # Prompt sent to dashboard agent (Agno-native)
+    agent_input = (
+        "[CONTEXT]\n"
+        f"selected_table={table}\n"
+        "[/CONTEXT]\n\n"
+        "Generate a default business dashboard for selected_table.\n"
+        "- First call describe_table(selected_table) to understand schema.\n"
+        "- If helpful, you may run read-only aggregate queries via postgres tools.\n"
+        "- Focus on business-relevant columns; ignore ingestion/technical metadata columns.\n"
+        "- Return ONLY valid JSON (no markdown).\n"
+        "Output JSON format:\n"
+        "{\n"
+        '  "table": "<schema.table>",\n'
+        '  "kpis": [{"title": "...", "value": 123, "unit": "%", "note": "..."}],\n'
+        '  "charts": [{"title": "...", "echarts": {...}, "note": "..."}],\n'
+        '  "notes": ["..."]\n'
+        "}\n"
+    )
 
-    if dashboard_agent is not None:
-        _DASHBOARD_AGENT = dashboard_agent
+    try:
+        out = dashboard_agent.run(input=agent_input, session_id=sid)
+        text = _extract_content(out)
 
+        log_debug(
+            f"DASHBOARD agent_raw_preview request_id={request_id} session_id={sid} "
+            f"preview='{(text or '')[:400]}'"
+        )
 
-----------------------------------------------------------------------------------
+        payload = _safe_json_loads(text)
 
-def get_dashboard_agent() -> Agent:
-    if _DASHBOARD_AGENT is None:
-        raise RuntimeError("Dashboard agent dependency not initialized")
-    return _DASHBOARD_AGENT
+        # Minimal shape validation (keep light)
+        if "table" not in payload:
+            payload["table"] = table
+        if "kpis" not in payload:
+            payload["kpis"] = []
+        if "charts" not in payload:
+            payload["charts"] = []
+        if "notes" not in payload:
+            payload["notes"] = []
+
+        resp: Dict[str, Any] = {
+            "table": str(payload.get("table") or table),
+            "session_id": sid,
+            "kpis": payload.get("kpis") or [],
+            "charts": payload.get("charts") or [],
+            "notes": payload.get("notes") or [],
+            "raw": {"request_id": request_id},
+        }
+
+    except Exception as e:
+        log_error(
+            f"DASHBOARD request_failed request_id={request_id} session_id={sid} table={table} error={e}"
+        )
+        store.add(
+            type="dashboard_error",
+            session_id=sid,
+            payload={"request_id": request_id, "table_name": table, "error": str(e)},
+        )
+        raise HTTPException(status_code=500, detail="Failed to generate dashboard")
+
+    store.add(
+        type="dashboard_response",
+        session_id=sid,
+        payload={"request_id": request_id, "table_name": table, "kpis": len(resp["kpis"]), "charts": len(resp["charts"])},
+    )
+
+    log_debug(
+        f"DASHBOARD request_done request_id={request_id} session_id={sid} table={table} "
+        f"kpis={len(resp['kpis'])} charts={len(resp['charts'])}"
+    )
+
+    # Return dict so FastAPI can validate against response_model cleanly
+    return resp
