@@ -1,156 +1,44 @@
-# src/api/routes/dashboard.py
-from __future__ import annotations
+instructions = [
+    "You are a Dashboard Generator Agent for business users.",
+    "Your job is to build a default dashboard for the selected_table with KPIs + charts + short insights.",
+    "You MUST call describe_table(selected_table) first to understand schema before deciding KPIs/charts.",
 
-import json
-from typing import Any, Dict, Optional
+    # Business relevance
+    "Prioritize business-relevant columns (amount, revenue, price, quantity, status, category, customer, product, region, date/time).",
+    "Ignore technical/operational/metadata columns such as source_file, file_name, record_created, created_at, updated_at, ingestion_time, batch_id, uuid, hash, internal flags.",
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+    # Output contract (STRICT)
+    "Return ONLY valid JSON. Do NOT wrap in markdown fences.",
+    "The JSON must follow this schema exactly:",
+    "{",
+    '  "table": "<schema.table>",',
+    '  "kpis": [{"title": "...", "value": 123, "unit": null, "note": null}],',
+    '  "charts": [{"title": "...", "echarts": {...}, "note": null}],',
+    '  "notes": ["..."]',
+    "}",
 
-from agno.agent import Agent
-from agno.utils.log import log_debug, log_error
+    # KPI rules
+    "Generate 3 to 6 KPIs.",
+    "KPI values must be computed using read-only SQL via postgres tools.",
+    "Always include: Total Records (COUNT(*)).",
+    "If there is an obvious numeric metric (amount/total/price/revenue/quantity), include SUM/AVG KPI(s).",
+    "If there is a categorical dimension (status/category/region/type), include DISTINCT count KPI.",
 
-from src.api.deps import get_dashboard_agent, get_store
-from src.api.models import DashboardResponse
-from src.api.store import InMemoryEventStore
+    # Chart rules
+    "Generate 2 to 4 charts.",
+    "Charts must be business-friendly and based on real query results.",
+    "If a date/timestamp column exists, include a trend line chart over time.",
+    "Include one Top-N breakdown chart for the most meaningful categorical column (Top 10 by count or by sum(metric)).",
+    "If a strong numeric metric exists, include a distribution chart or bucketed histogram (if feasible).",
+    "Use ECharts tools to generate the final 'echarts' JSON object. Do not manually craft ECharts JSON.",
+    "When calling chart tools, pass data in the tool’s required format (dict or list of dicts).",
 
-router = APIRouter(prefix="/api", tags=["dashboard"])
+    # DQ integration (lightweight)
+    "Run 1 or 2 lightweight data quality checks only if they are cheap (e.g., missing value % for key columns, duplicates on primary-like key).",
+    "If a major quality issue is detected, include it as a short note in 'notes' (do not add a separate section).",
 
-
-def _extract_content(out: Any) -> str:
-    if out is None:
-        return ""
-    if hasattr(out, "content"):
-        c = getattr(out, "content")
-        return "" if c is None else str(c)
-    return str(out)
-
-
-def _safe_json_loads(s: str) -> Dict[str, Any]:
-    """
-    Dashboard agent must return pure JSON.
-    Defensive stripping if markdown fences slip through.
-    """
-    raw = (s or "").strip()
-
-    # Strip fenced blocks like ```json ... ```
-    if raw.startswith("```"):
-        lines = raw.splitlines()
-        if lines:
-            lines = lines[1:]
-        if lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
-        raw = "\n".join(lines).strip()
-
-    if raw.lower().startswith("json"):
-        raw = raw[4:].strip()
-
-    obj = json.loads(raw)
-
-    if obj is None:
-        raise ValueError("Dashboard agent returned JSON null (expected an object).")
-    if not isinstance(obj, dict):
-        raise ValueError(f"Dashboard agent returned JSON type {type(obj).__name__} (expected object).")
-
-    return obj
-
-
-@router.get("/dashboard", response_model=DashboardResponse)
-def get_dashboard(
-    request: Request,
-    table_name: str = Query(..., min_length=1, description="Selected table e.g. public.orders"),
-    session_id: Optional[str] = Query(default=None, description="Session id for stateful UX"),
-    store: InMemoryEventStore = Depends(get_store),
-    dashboard_agent: Agent = Depends(get_dashboard_agent),
-) -> Dict[str, Any]:
-    """
-    Returns a default dashboard JSON (KPIs + ECharts configs) for a selected table.
-    UI calls this when Dashboard tab is opened.
-    """
-    request_id = getattr(request.state, "request_id", "unknown")
-    sid = session_id or "default"
-    table = table_name.strip()
-
-    # Bind table to session (consistent with chat/insights)
-    store.set_session_value(sid, "selected_table", table)
-
-    log_debug(f"DASHBOARD request_start request_id={request_id} session_id={sid} table={table}")
-
-    store.add(
-        type="dashboard_request",
-        session_id=sid,
-        payload={"request_id": request_id, "table_name": table},
-    )
-
-    # Prompt sent to dashboard agent (Agno-native)
-    agent_input = (
-        "[CONTEXT]\n"
-        f"selected_table={table}\n"
-        "[/CONTEXT]\n\n"
-        "Generate a default business dashboard for selected_table.\n"
-        "- First call describe_table(selected_table) to understand schema.\n"
-        "- If helpful, you may run read-only aggregate queries via postgres tools.\n"
-        "- Focus on business-relevant columns; ignore ingestion/technical metadata columns.\n"
-        "- Return ONLY valid JSON (no markdown).\n"
-        "Output JSON format:\n"
-        "{\n"
-        '  "table": "<schema.table>",\n'
-        '  "kpis": [{"title": "...", "value": 123, "unit": "%", "note": "..."}],\n'
-        '  "charts": [{"title": "...", "echarts": {...}, "note": "..."}],\n'
-        '  "notes": ["..."]\n'
-        "}\n"
-    )
-
-    try:
-        out = dashboard_agent.run(input=agent_input, session_id=sid)
-        text = _extract_content(out)
-
-        log_debug(
-            f"DASHBOARD agent_raw_preview request_id={request_id} session_id={sid} "
-            f"preview='{(text or '')[:400]}'"
-        )
-
-        payload = _safe_json_loads(text)
-
-        # Minimal shape validation (keep light)
-        if "table" not in payload:
-            payload["table"] = table
-        if "kpis" not in payload:
-            payload["kpis"] = []
-        if "charts" not in payload:
-            payload["charts"] = []
-        if "notes" not in payload:
-            payload["notes"] = []
-
-        resp: Dict[str, Any] = {
-            "table": str(payload.get("table") or table),
-            "session_id": sid,
-            "kpis": payload.get("kpis") or [],
-            "charts": payload.get("charts") or [],
-            "notes": payload.get("notes") or [],
-            "raw": {"request_id": request_id},
-        }
-
-    except Exception as e:
-        log_error(
-            f"DASHBOARD request_failed request_id={request_id} session_id={sid} table={table} error={e}"
-        )
-        store.add(
-            type="dashboard_error",
-            session_id=sid,
-            payload={"request_id": request_id, "table_name": table, "error": str(e)},
-        )
-        raise HTTPException(status_code=500, detail="Failed to generate dashboard")
-
-    store.add(
-        type="dashboard_response",
-        session_id=sid,
-        payload={"request_id": request_id, "table_name": table, "kpis": len(resp["kpis"]), "charts": len(resp["charts"])},
-    )
-
-    log_debug(
-        f"DASHBOARD request_done request_id={request_id} session_id={sid} table={table} "
-        f"kpis={len(resp['kpis'])} charts={len(resp['charts'])}"
-    )
-
-    # Return dict so FastAPI can validate against response_model cleanly
-    return resp
+    # Safety/performance
+    "All SQL must be SELECT/WITH only. Never use INSERT/UPDATE/DELETE/DDL.",
+    "Avoid heavy queries. Use aggregates and LIMIT for Top-N.",
+    "Do not return huge tables; summarize results only.",
+]
