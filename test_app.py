@@ -1,101 +1,125 @@
-4. Application Architecture Layers
+4.5 Agent Orchestration Layer
 
-The backend system follows a layered architecture that separates responsibilities across distinct functional layers. This design improves maintainability, scalability, and security by ensuring that each layer handles a specific set of responsibilities.
+The orchestration layer coordinates how requests are processed by the various agents in the system.
 
-Requests flow through the system sequentially, starting from the client layer and moving through the API, orchestration, agent, and data layers before returning a structured response to the user.
+For conversational queries, the request is passed to a Team Orchestrator, which determines which specialized agent should handle the request.
 
-The major architecture layers are described below.
+The orchestrator performs the following tasks:
 
-4.1 Client Layer (Frontend UI)
+Analyzes the user query
 
-The client layer represents the user-facing interface that interacts with the backend APIs. The frontend application provides a simplified analytics experience through three main modules:
+Determines the most suitable agent
 
-Chat Interface
+Coordinates agent execution
 
-Allows users to ask natural language questions about a selected table.
+Ensures tool usage follows defined safety constraints
 
-The system converts the query into a safe SQL query and returns structured responses such as textual summaries, charts, or tables.
+This layer enables the system to operate as a multi-agent analytical platform, where different agents handle different analytical tasks.
 
-Insights Interface
+4.6 Specialized Agent Layer
 
-Displays automatically generated analytical prompts for the selected table.
+The system contains multiple specialized agents designed to perform specific analytical tasks.
 
-These prompts help users explore the dataset without requiring SQL knowledge.
+Examples include:
 
-Dashboard Interface
+General Purpose Agent
 
-Generates a default analytical dashboard for the selected table.
+Handles standard analytical queries about the dataset.
 
-Includes metrics, visualizations, and tabular summaries derived from the table schema and data.
+Data Quality Agent
 
-The frontend communicates with the backend exclusively through REST APIs exposed by the FastAPI server.
+Identifies potential data quality issues such as missing values, duplicates, or inconsistencies.
 
-4.2 API Layer (FastAPI)
+Anomaly Detection Agent
 
-The API layer acts as the entry point into the backend system and exposes endpoints used by the frontend.
+Detects unusual patterns or statistical outliers within the dataset.
 
-The API layer is implemented using FastAPI, which provides request validation, dependency injection, and automatic API documentation.
+Insights Agent
 
-The primary API endpoints include:
+Generates business-relevant analytical prompts for exploration.
 
-Endpoint	Purpose
-/api/chat	Handles natural language data queries
-/api/insights/prompts	Generates analytical prompts for a table
-/api/dashboard	Generates a default dashboard for a table
-/api/auth/login	Authenticates users and issues JWT tokens
+Dashboard Agent
 
-The API layer performs several critical functions:
+Produces a structured dashboard consisting of metrics, charts, and tables.
 
-Request validation using Pydantic models
+Each agent operates based on a defined set of instructions and tools that guide its reasoning and behavior.
 
-Authentication and authorization
+4.7 Tooling Layer
 
-Session management
+Agents interact with external systems and perform operations through a set of controlled tools.
 
-Dependency injection for agents and services
+The tooling layer ensures that all operations performed by agents are safe, auditable, and restricted to allowed actions.
 
-Request logging and tracing
+Key tools used in the system include:
 
-Error handling and response formatting
+SafePostgresTools
 
-After validation, requests are routed to the agent orchestration layer for further processing.
+Executes read-only SQL queries against the PostgreSQL database.
 
-4.3 Authentication & Security Layer
+Includes SQL validation to prevent unsafe operations.
 
-To protect the system from unauthorized access, the backend implements a JWT-based authentication mechanism.
+ECharts Tools
 
-Users must first authenticate using the login endpoint to obtain a JSON Web Token (JWT). This token must then be included in subsequent API requests using the HTTP Authorization header.
+Generates chart configuration JSON used to render visualizations on the frontend.
 
-Example header:
+Data Quality Tools
 
-Authorization: Bearer <access_token>
+Produces tabular summaries and analytical outputs related to dataset quality.
 
-Security measures implemented in this layer include:
+Tools act as the bridge between agent reasoning and system operations.
 
-JWT token validation
+4.8 Data Access Layer
 
-Protected API endpoints
+The data access layer manages interactions with the underlying PostgreSQL database.
 
-Optional rate limiting
+Agents do not access the database directly. Instead, all database interactions occur through controlled tool interfaces.
 
-Secure environment configuration for credentials
+The system enforces several safeguards:
 
-This ensures that only authenticated users can access the analytics functionality.
+Use of a read-only database role
 
-4.4 Dependency Injection Layer
+SQL query validation
 
-The system uses FastAPI’s dependency injection mechanism to manage shared components across the application.
+Prevention of data modification commands
 
-This layer is responsible for initializing and providing access to core services such as:
+Query execution through SafePostgresTools
 
-Agent teams
+These safeguards ensure that the AI system cannot perform destructive operations on the database.
 
-Insights agent
+4.9 Session Management Layer
 
-Dashboard agent
+The platform maintains contextual information across requests using a session management system.
 
-Event store
+Session information includes:
 
-Database tools
+Selected table context
 
-The dependency injection system ensures that these components are initialized once a
+User interaction history
+
+Request metadata
+
+Agent responses
+
+This information is stored in an event store, allowing the system to maintain state across multiple interactions and provide a consistent user experience.
+
+4.10 Logging and Monitoring Layer
+
+The logging layer provides observability into system behavior and helps diagnose issues during development and production.
+
+The system uses structured logging via:
+
+agno.utils.log
+
+Logs capture key events such as:
+
+API request lifecycle
+
+SQL query execution
+
+Agent decisions
+
+Error conditions
+
+Security events
+
+Structured logging enables easier debugging, monitoring, and integration with centralized logging systems in production environments.
