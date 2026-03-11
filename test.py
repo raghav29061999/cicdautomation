@@ -1,59 +1,75 @@
-def _extract_content(out: Any) -> str:
-    """
-    Robust extractor for Agno RunOutput.
-
-    Strategy:
-    1. Try top-level out.content
-    2. Scan messages in reverse and return the last non-empty content
-    3. Fallback to string conversion
-    """
+def _extract_text_from_any(out: Any) -> str:
     if out is None:
         return ""
 
-    # 1) Top-level content
-    if hasattr(out, "content"):
-        c = getattr(out, "content", None)
-        if c is not None:
-            if isinstance(c, str) and c.strip():
-                return c
-            if isinstance(c, dict):
-                import json
-                return json.dumps(c, ensure_ascii=False)
-            s = str(c)
-            if s.strip():
-                return s
+    # 1. Try extracting from .content
+    text = _extract_from_content(out)
+    if text:
+        return text
 
-    # 2) Scan messages from last to first
-    if hasattr(out, "messages"):
-        msgs = getattr(out, "messages", None)
-        if isinstance(msgs, list):
-            for msg in reversed(msgs):
-                # dict-like message
-                if isinstance(msg, dict):
-                    c = msg.get("content")
-                    if c is not None and str(c).strip():
-                        return str(c)
+    # 2. Try common attributes
+    text = _extract_from_attrs(out)
+    if text:
+        return text
 
-                # object-like message
-                if hasattr(msg, "content"):
-                    c = getattr(msg, "content", None)
-                    if c is not None and str(c).strip():
-                        return str(c)
+    # 3. Try message list
+    text = _extract_from_messages(out)
+    if text:
+        return text
 
-    # 3) Fallback
-    try:
-        s = str(out)
-        return s if s.strip() else ""
-    except Exception:
+    return _safe_str(out)
+
+
+def _extract_from_content(out: Any) -> str:
+    if not hasattr(out, "content"):
         return ""
 
+    c = getattr(out, "content", None)
 
-----------------
-print("TOP LEVEL CONTENT:", repr(getattr(out, "content", None)))
+    if isinstance(c, str) and c.strip():
+        return c
 
-if hasattr(out, "messages") and out.messages:
-    for i, msg in enumerate(out.messages):
-        if isinstance(msg, dict):
-            print(f"MSG {i} DICT CONTENT:", repr(msg.get("content")))
-        else:
-            print(f"MSG {i} OBJ CONTENT:", repr(getattr(msg, "content", None)))
+    if isinstance(c, dict):
+        for k in ("reply", "text", "message", "output", "content"):
+            v = c.get(k)
+            if isinstance(v, str) and v.strip():
+                return v
+        return json.dumps(c, ensure_ascii=False)
+
+    if c is not None:
+        s = _safe_str(c)
+        if s.strip():
+            return s
+
+    return ""
+
+def _extract_from_attrs(out: Any) -> str:
+    for attr in ("output", "text", "message", "reply"):
+        if hasattr(out, attr):
+            v = getattr(out, attr, None)
+            if isinstance(v, str) and v.strip():
+                return v
+    return ""
+
+def _extract_from_messages(out: Any) -> str:
+    if not hasattr(out, "messages"):
+        return ""
+
+    msgs = getattr(out, "messages", None)
+    if not isinstance(msgs, list) or not msgs:
+        return ""
+
+    last = msgs[-1]
+
+    if isinstance(last, str) and last.strip():
+        return last
+
+    if isinstance(last, dict):
+        for k in ("content", "text", "message"):
+            v = last.get(k)
+            if isinstance(v, str) and v.strip():
+                return v
+        return json.dumps(last, ensure_ascii=False)
+
+    s = _safe_str(last)
+    return s if s.strip() else ""
