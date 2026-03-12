@@ -1,236 +1,321 @@
-def _resolve_request_inputs(
-    req: ChatRequest,
-    request_id: str,
-    session_id: str,
-    metadata: Dict[str, Any],
-    store: InMemoryEventStore,
-) -> tuple[str | None, str | None]:
-    table_name = (req.table_name or "").strip() if req.table_name else None
-    user_query = (req.user_query or "").strip() if req.user_query else None
-
-    if table_name and user_query:
-        return table_name, user_query
-
-    if req.message:
-        store.add(
-            type="chat_request_legacy",
-            session_id=session_id,
-            payload={
-                "message": req.message.strip(),
-                "metadata": metadata,
-                "request_id": request_id,
-            },
-        )
-        raise HTTPException(
-            status_code=400,
-            detail="Legacy request detected. Please use: table_name + user_query (+ session_id).",
-        )
-
-    raise HTTPException(status_code=400, detail="Provide table_name and user_query")
-
--------------------------------------------------------------------------------------------------------
-
-def _resolve_selected_table(
-    store: InMemoryEventStore,
-    session_id: str,
-    table_name: str | None,
-) -> str | None:
-    if table_name:
-        store.set_session_value(session_id, "selected_table", table_name)
-    return store.get_session_value(session_id, "selected_table", None)
+instructions = [
+    "You are a Business Dashboard Generator Agent.",
+    "Your task is to generate a default dashboard for the selected_table.",
+    "You MUST call describe_table(selected_table) first.",
+    "Use only business-relevant columns for analysis.",
+    "Ignore metadata, ingestion, technical, audit, or system-generated columns such as source_file, record_created, updated_at, created_at, batch_id, uuid, hash, file_name.",
+    "Use postgres tools to compute real values for metrics.",
+    "Use chart tools to generate chart JSON when needed.",
+    "Use data quality tools only if they add useful business value.",
+    "Generate a compact business dashboard with:",
+    "- 3 to 5 key metrics",
+    "- 2 to 4 charts",
+    "- 0 to 2 markdown tables",
+    "- 2 to 5 short business notes",
+    "Charts should be meaningful for business users such as top categories, trend over time, or distribution of important measures.",
+    "Metrics should focus on record volume, totals, averages, distinct categories, or business-critical values.",
+    "Do NOT generate unnecessary prompts or technical analysis.",
+    "Do NOT explain your reasoning.",
+    "Do NOT wrap output in markdown fences.",
+    "Return ONLY valid JSON.",
+    "Return JSON in exactly this format:",
+    "{",
+    '  "table": "<schema.table>",',
+    '  "metrics": [{"title": "...", "value": 123, "unit": null, "note": "..."}],',
+    '  "charts": [{"title": "...", "echarts": "...", "note": "..."}],',
+    '  "tables": [{"title": "...", "markdown": "...", "note": "..."}],',
+    '  "notes": ["..."]',
+    "}",
+    "For each chart, set charts[].echarts to the raw output returned by the chart tool.",
+],
 
 
-------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------
 
-def _run_team_with_fallback(
-    *,
-    team: Team,
-    final_prompt: str,
-    session_id: str,
-    request_id: str,
-    selected_table: str,
-    user_query: str,
-    store: InMemoryEventStore,
-) -> tuple[str, str, Dict[str, Any] | None]:
-    try:
-        log_debug(f"CHAT team_run_start request_id={request_id} session_id={session_id}")
-        out = team.run(input=final_prompt, session_id=session_id)
+# src/api/routes/dashboard.py
+from __future__ import annotations
 
-        raw_text = _extract_text_from_any(out)
-        clean_text, graph_json_str = _extract_graph_from_fence(raw_text)
+import json
+from typing import Any, Dict, List, Optional
 
-        reply = _extract_team_content(out) or clean_text or raw_text
-        agent_used = extract_agent_used(out)
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-        structured_output = None
-        if graph_json_str and graph_json_str.strip():
-            structured_output = {"graph_json": graph_json_str}
+from agno.agent import Agent
+from agno.utils.log import log_debug, log_error
 
-        return reply, agent_used, structured_output
+from src.api.deps import get_dashboard_agent, get_store
+from src.api.models import DashboardResponse
+from src.api.store import InMemoryEventStore
 
-    except Exception as e:
-        log_error(f"CHAT team_run_failed request_id={request_id} session_id={session_id} error={e}")
-        store.add(
-            type="chat_error",
-            session_id=session_id,
-            payload={
-                "request_id": request_id,
-                "error": str(e),
-                "table_name": selected_table,
-                "user_query": user_query,
-            },
-        )
+router = APIRouter(prefix="/api", tags=["dashboard"])
 
-        fallback = _fallback_member(team)
-        if fallback is None:
-            return "System is temporarily unable to process your request. Please try again.", "none", None
 
-        log_debug(
-            f"CHAT fallback_start request_id={request_id} session_id={session_id} fallback_member=first_member"
-        )
+def _extract_content(out: Any) -> str:
+    if out is None:
+        return ""
+
+    if hasattr(out, "content"):
+        c = getattr(out, "content", None)
+        if c is not None and str(c).strip():
+            return str(c)
+
+    if hasattr(out, "messages"):
+        msgs = getattr(out, "messages", None)
+        if isinstance(msgs, list):
+            for msg in reversed(msgs):
+                if isinstance(msg, dict):
+                    c = msg.get("content")
+                    if c is not None and str(c).strip():
+                        return str(c)
+                elif hasattr(msg, "content"):
+                    c = getattr(msg, "content", None)
+                    if c is not None and str(c).strip():
+                        return str(c)
+
+    return ""
+
+
+def _strip_fences(raw: str) -> str:
+    text = (raw or "").strip()
+
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines:
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    if text.lower().startswith("json"):
+        text = text[4:].strip()
+
+    return text
+
+
+def _load_payload(text: str) -> Dict[str, Any]:
+    cleaned = _strip_fences(text)
+    if not cleaned:
+        raise ValueError("Dashboard agent returned empty content")
+
+    payload = json.loads(cleaned)
+    if payload is None or not isinstance(payload, dict):
+        raise ValueError("Dashboard agent did not return a valid JSON object")
+
+    return payload
+
+
+def _normalize_echarts(value: Any) -> Dict[str, Any] | str:
+    if value is None:
+        return {}
+
+    if isinstance(value, dict):
+        return value
+
+    if isinstance(value, str):
+        raw = _strip_fences(value)
+
+        if raw.lower().startswith("echarts"):
+            raw = raw[7:].strip()
 
         try:
-            reply = _call_member(fallback, final_prompt, session_id=session_id)
-            return reply, "fallback_member_0", None
-        except Exception as e2:
-            log_error(
-                f"CHAT fallback_failed request_id={request_id} session_id={session_id} error={e2}"
-            )
-            return "System is temporarily unable to process your request. Please try again.", "none", None
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else raw
+        except Exception:
+            return raw
 
----------------------------------------------------------------------------------------------------------------
+    return str(value)
 
-def _build_chat_response(
-    *,
+
+def _normalize_metrics(items: Any) -> List[Dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        normalized.append(
+            {
+                "title": str(item.get("title") or "Metric"),
+                "value": item.get("value", ""),
+                "unit": None if item.get("unit") is None else str(item.get("unit")),
+                "note": None if item.get("note") is None else str(item.get("note")),
+            }
+        )
+    return normalized
+
+
+def _normalize_charts(items: Any) -> List[Dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        raw_chart = item.get("echarts", item.get("echart"))
+        normalized.append(
+            {
+                "title": str(item.get("title") or "Chart"),
+                "echarts": _normalize_echarts(raw_chart),
+                "note": None if item.get("note") is None else str(item.get("note")),
+            }
+        )
+    return normalized
+
+
+def _normalize_tables(items: Any) -> List[Dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        normalized.append(
+            {
+                "title": str(item.get("title") or "Table"),
+                "markdown": str(item.get("markdown") or ""),
+                "note": None if item.get("note") is None else str(item.get("note")),
+            }
+        )
+    return normalized
+
+
+def _normalize_notes(items: Any) -> List[str]:
+    if not isinstance(items, list):
+        return []
+    return [str(x) for x in items if str(x).strip()]
+
+
+def _build_agent_input(table: str) -> str:
+    return (
+        "[CONTEXT]\n"
+        f"selected_table={table}\n"
+        "[/CONTEXT]\n\n"
+        "Generate a default business dashboard for selected_table.\n"
+        "You must return ONLY valid JSON in the agreed schema."
+    )
+
+
+def _build_response(
+    table: str,
+    sid: str,
     request_id: str,
-    session_id: str,
-    selected_table: str,
-    reply: str,
-    agent_used: str,
-    structured_output: Dict[str, Any] | None,
-    dt_ms: int,
-    store: InMemoryEventStore,
-) -> ChatResponse:
-    final_reply = reply or "No response generated. Please rephrase your question and try again."
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "table": str(payload.get("table") or table),
+        "session_id": sid,
+        "metrics": _normalize_metrics(payload.get("metrics")),
+        "charts": _normalize_charts(payload.get("charts")),
+        "tables": _normalize_tables(payload.get("tables")),
+        "notes": _normalize_notes(payload.get("notes")),
+        "raw": {"request_id": request_id},
+    }
 
-    log_debug(
-        f"CHAT request_done request_id={request_id} session_id={session_id} "
-        f"agent_used={agent_used} latency_ms={dt_ms}"
-    )
 
-    store.add(
-        type="chat_response",
-        session_id=session_id,
-        payload={
-            "request_id": request_id,
-            "agent_used": agent_used,
-            "reply_preview": final_reply[:200],
-            "table_name": selected_table,
-            "latency_ms": dt_ms,
-            "structured_output": structured_output,
-        },
-    )
-
-    return ChatResponse(
-        session_id=session_id,
-        agent_used=agent_used,
-        reply=final_reply,
-        structured_output=structured_output,
-        raw={
-            "request_id": request_id,
-            "selected_table": selected_table,
-        },
-    )
-
-----------------------------------------------------------------------------------
-
-@router.post("/chat", response_model=ChatResponse)
-def chat(
-    req: ChatRequest,
+@router.get("/dashboard", response_model=DashboardResponse)
+def get_dashboard(
     request: Request,
-    team: Team = Depends(get_team),
+    table_name: str = Query(..., min_length=1, description="Selected table e.g. public.orders"),
+    session_id: Optional[str] = Query(default=None, description="Session id for stateful UX"),
     store: InMemoryEventStore = Depends(get_store),
-    user=Depends(get_current_user),
-) -> ChatResponse:
+    dashboard_agent: Agent = Depends(get_dashboard_agent),
+) -> Dict[str, Any]:
     request_id = getattr(request.state, "request_id", "unknown")
-    session_id = req.session_id or "default"
-    metadata: Dict[str, Any] = req.metadata or {}
+    sid = session_id or "default"
+    table = table_name.strip()
 
-    rate_limit(user["user_id"])
+    store.set_session_value(sid, "selected_table", table)
 
-    table_name, user_query = _resolve_request_inputs(
-        req=req,
-        request_id=request_id,
-        session_id=session_id,
-        metadata=metadata,
-        store=store,
+    log_debug(f"DASHBOARD request_start request_id={request_id} session_id={sid} table={table}")
+    store.add(
+        type="dashboard_request",
+        session_id=sid,
+        payload={"request_id": request_id, "table_name": table},
     )
 
-    selected_table = _resolve_selected_table(store, session_id, table_name)
+    try:
+        out = dashboard_agent.run(input=_build_agent_input(table), session_id=sid)
+        text = _extract_content(out)
 
-    if not selected_table:
-        guidance = (
-            "No table is selected for this session. Please send a table_name.\n"
-            "Example: table_name=public.orders, user_query='show top 5 orders'"
+        log_debug(
+            f"DASHBOARD agent_raw_preview request_id={request_id} "
+            f"session_id={sid} preview='{(text or '')[:400]}'"
+        )
+
+        payload = _load_payload(text)
+        response = _build_response(table, sid, request_id, payload)
+
+    except Exception as e:
+        log_error(
+            f"DASHBOARD request_failed request_id={request_id} "
+            f"session_id={sid} table={table} error={e}"
         )
         store.add(
-            type="chat_response",
-            session_id=session_id,
-            payload={"agent_used": "none", "reply": guidance},
+            type="dashboard_error",
+            session_id=sid,
+            payload={"request_id": request_id, "table_name": table, "error": str(e)},
         )
-        return ChatResponse(
-            session_id=session_id,
-            agent_used="none",
-            reply=guidance,
-            structured_output=None,
-            raw={},
-        )
-
-    final_prompt = _inject_context(user_query, selected_table)
-
-    log_debug(
-        f"CHAT request_start request_id={request_id} session_id={session_id} "
-        f"table={selected_table} user_query_preview='{user_query[:120]}'"
-    )
+        raise HTTPException(status_code=500, detail="Failed to generate dashboard")
 
     store.add(
-        type="chat_request",
-        session_id=session_id,
+        type="dashboard_response",
+        session_id=sid,
         payload={
             "request_id": request_id,
-            "table_name": selected_table,
-            "user_query": user_query,
-            "metadata": metadata,
+            "table_name": table,
+            "metrics": len(response["metrics"]),
+            "charts": len(response["charts"]),
+            "tables": len(response["tables"]),
         },
     )
 
-    t0 = time.perf_counter()
-
-    reply, agent_used, structured_output = _run_team_with_fallback(
-        team=team,
-        final_prompt=final_prompt,
-        session_id=session_id,
-        request_id=request_id,
-        selected_table=selected_table,
-        user_query=user_query,
-        store=store,
+    log_debug(
+        f"DASHBOARD request_done request_id={request_id} session_id={sid} table={table} "
+        f"metrics={len(response['metrics'])} charts={len(response['charts'])} "
+        f"tables={len(response['tables'])}"
     )
 
-    dt_ms = int((time.perf_counter() - t0) * 1000)
-
-    return _build_chat_response(
-        request_id=request_id,
-        session_id=session_id,
-        selected_table=selected_table,
-        reply=reply,
-        agent_used=agent_used,
-        structured_output=structured_output,
-        dt_ms=dt_ms,
-        store=store,
-    )
-
--------------------------------------------------------------------
+    return response
 
 
+-----------------------------------------------
 
-refactor: reduce chat endpoint cognitive complexity by extracting helper flows
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+from pydantic import BaseModel, Field
+
+
+class DashboardChart(BaseModel):
+    title: str
+    echarts: Dict[str, Any] | str
+    note: Optional[str] = None
+
+
+class DashboardTable(BaseModel):
+    title: str
+    markdown: str
+    note: Optional[str] = None
+
+
+class DashboardMetric(BaseModel):
+    title: str
+    value: int | float | str
+    unit: Optional[str] = None
+    note: Optional[str] = None
+
+
+class DashboardResponse(BaseModel):
+    table: str
+    session_id: Optional[str] = None
+    metrics: List[DashboardMetric] = Field(default_factory=list)
+    charts: List[DashboardChart] = Field(default_factory=list)
+    tables: List[DashboardTable] = Field(default_factory=list)
+    notes: List[str] = Field(default_factory=list)
+    raw: Dict[str, Any] = Field(default_factory=dict)
