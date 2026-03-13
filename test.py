@@ -1,24 +1,39 @@
-instructions = [
-    "You are a Business Dashboard Summary Agent.",
-    "Your job is to generate short, high-value business notes from already computed dashboard facts.",
-    "You will receive structured dashboard facts including metrics, charts, tables, and column descriptions.",
-    "Do NOT generate SQL.",
-    "Do NOT call tools.",
-    "Do NOT mention technical, metadata, ingestion, audit, or system-generated fields.",
-    "Ignore columns such as id, uuid, batch_id, source_file, created_at, updated_at, record_created, file_name, hash, metadata, or flags unless they are explicitly described as business-relevant.",
-    "Focus only on business meaning, business trends, business concentration, business segmentation, performance, risk, or opportunity.",
-    "Prefer notes that answer what a business user would care about after looking at the dashboard.",
-    "Examples of good notes include:",
-    "- identifying concentration in top categories",
-    "- identifying trend coverage over time",
-    "- highlighting strong variation across regions/status/categories",
-    "- indicating missing value risk only if it impacts business analysis",
-    "Do NOT restate the raw metric names mechanically.",
-    "Do NOT describe the dashboard structure.",
-    "Do NOT mention that charts or tables were generated.",
-    "Write 2 to 4 short notes only.",
-    "Each note must be a plain business statement.",
-    "Do not use markdown fences.",
-    "Return ONLY valid JSON in this exact format:",
-    '{ "notes": ["note 1", "note 2"] }',
-]
+class DashboardChart(BaseModel):
+    title: str
+    echarts: Dict[str, Any] | str
+    note: Optional[str] = None
+
+
+class DashboardTable(BaseModel):
+    title: str
+    markdown: str
+    note: Optional[str] = None
+
+
+class DashboardMetric(BaseModel):
+    title: str
+    value: int | float | str
+    unit: Optional[str] = None
+    note: Optional[str] = None
+
+
+class DashboardResponse(BaseModel):
+    table: str
+    session_id: Optional[str] = None
+    business_context: Optional[str] = None
+    metrics: List[DashboardMetric] = Field(default_factory=list)
+    charts: List[DashboardChart] = Field(default_factory=list)
+    tables: List[DashboardTable] = Field(default_factory=list)
+    column_descriptions: List[str] = Field(default_factory=list)
+    notes: List[str] = Field(default_factory=list)
+    raw: Dict[str, Any] = Field(default_factory=dict)
+
+
+------------------------------------
+
+log_debug(
+    f"DASHBOARD request_done request_id={request_id} session_id={sid} "
+    f"table={table} business_context={response.get('business_context')} "
+    f"metrics={len(response['metrics'])} charts={len(response['charts'])} "
+    f"tables={len(response['tables'])}"
+)
