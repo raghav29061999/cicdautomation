@@ -1,41 +1,5 @@
 from __future__ import annotations
 
-from agno.agent import Agent
-from agno.utils.log import log_debug
-
-from src.config import get_llm_model
-
-
-def create_dashboard_summary_agent() -> Agent:
-    """
-    Lightweight AI agent used only to generate short business notes
-    from already-computed dashboard facts.
-    """
-    agent = Agent(
-        id="dashboard_summary_agent",
-        name="Dashboard Summary Agent",
-        model=get_llm_model(),
-        instructions=[
-            "You are a business analytics narrator.",
-            "Your input will contain dashboard facts already computed by the system.",
-            "You must NOT generate SQL.",
-            "You must NOT call tools.",
-            "Write 2 to 4 short business notes only.",
-            "Keep notes factual and concise.",
-            "Do not add markdown fences.",
-            "Return ONLY valid JSON in this format:",
-            '{ "notes": ["note 1", "note 2"] }',
-        ],
-    )
-
-    log_debug("Dashboard Summary Agent initialized")
-    return agent
-
--------------------------------------------------------------------------------------------------------------
-src/api/services/dashboard_builder.py
-
-from __future__ import annotations
-
 import csv
 import json
 import re
@@ -47,13 +11,7 @@ from agno.agent import Agent
 from agno.utils.log import log_debug, log_error
 
 from src.config.database import get_postgres_tools
-
-# Adjust this import to your project if needed.
-# It should return an object exposing:
-# create_bar_chart(data, xlabel, ylabel, title)
-# create_line_chart(data, xlabel, ylabel, title)
-# create_pie_chart(data, xlabel, ylabel, title)
-from src.tools.chart_tools import charttools
+from src.tools import ChartTools
 
 
 TECH_SUBSTRINGS = (
@@ -149,6 +107,7 @@ def _parse_csv_rows(text: str) -> List[Dict[str, str]]:
     raw = (text or "").strip()
     if not raw:
         return []
+
     lowered = raw.lower()
     if lowered.startswith("error executing query:") or lowered.startswith("an unexpected error occurred:"):
         return []
@@ -163,7 +122,7 @@ def _extract_content(out: Any) -> str:
 
     candidates: List[str] = []
 
-    def collect(value: Any) -> None:
+    def _collect(value: Any) -> None:
         if value is None:
             return
         if isinstance(value, str):
@@ -182,18 +141,18 @@ def _extract_content(out: Any) -> str:
             candidates.append(s)
 
     if hasattr(out, "content"):
-        collect(getattr(out, "content", None))
+        _collect(getattr(out, "content", None))
 
     if hasattr(out, "messages"):
         msgs = getattr(out, "messages", None)
         if isinstance(msgs, list):
             for msg in msgs:
                 if isinstance(msg, dict):
-                    collect(msg.get("content"))
+                    _collect(msg.get("content"))
                 elif hasattr(msg, "content"):
-                    collect(getattr(msg, "content", None))
+                    _collect(getattr(msg, "content", None))
                 else:
-                    collect(msg)
+                    _collect(msg)
 
     if not candidates:
         return ""
@@ -201,6 +160,7 @@ def _extract_content(out: Any) -> str:
     for candidate in reversed(candidates):
         if '"notes"' in candidate:
             return candidate
+
     return candidates[-1]
 
 
@@ -234,8 +194,8 @@ def _safe_json_object(text: str) -> Dict[str, Any]:
 
 
 def _is_technical(col: ColumnInfo) -> bool:
-    name = col.name.lower()
-    return any(token in name for token in TECH_SUBSTRINGS)
+    lowered = col.name.lower()
+    return any(token in lowered for token in TECH_SUBSTRINGS)
 
 
 def _score_name(name: str, preferred: tuple[str, ...]) -> int:
@@ -249,52 +209,52 @@ def _score_name(name: str, preferred: tuple[str, ...]) -> int:
 def _parse_schema(pg: Any, table_name: str) -> List[ColumnInfo]:
     bare_table = table_name.split(".")[-1]
     rows = _parse_csv_rows(pg.describe_table(bare_table))
-    cols: List[ColumnInfo] = []
+
+    parsed: List[ColumnInfo] = []
     for row in rows:
-        cols.append(
+        parsed.append(
             ColumnInfo(
                 name=str(row.get("column_name") or "").strip(),
                 data_type=str(row.get("data_type") or "").strip().lower(),
                 is_nullable=str(row.get("is_nullable") or "").strip(),
             )
         )
-    return cols
+    return parsed
 
 
 def _pick_numeric_columns(columns: List[ColumnInfo]) -> List[ColumnInfo]:
-    numeric = [c for c in columns if c.data_type in NUMERIC_TYPES and not _is_technical(c)]
-    return sorted(numeric, key=lambda c: _score_name(c.name, PREFERRED_NUMERIC_NAMES))
+    items = [c for c in columns if c.data_type in NUMERIC_TYPES and not _is_technical(c)]
+    return sorted(items, key=lambda c: _score_name(c.name, PREFERRED_NUMERIC_NAMES))
 
 
 def _pick_time_columns(columns: List[ColumnInfo]) -> List[ColumnInfo]:
-    time_cols = [c for c in columns if c.data_type in TIME_TYPES and not _is_technical(c)]
-    return sorted(time_cols, key=lambda c: _score_name(c.name, PREFERRED_TIME_NAMES))
+    items = [c for c in columns if c.data_type in TIME_TYPES and not _is_technical(c)]
+    return sorted(items, key=lambda c: _score_name(c.name, PREFERRED_TIME_NAMES))
 
 
 def _pick_category_columns(columns: List[ColumnInfo]) -> List[ColumnInfo]:
-    categories: List[ColumnInfo] = []
-    for c in columns:
-        dtype = c.data_type
-        if _is_technical(c):
+    items: List[ColumnInfo] = []
+    for col in columns:
+        if _is_technical(col):
             continue
-        if dtype in NUMERIC_TYPES or dtype in TIME_TYPES:
+        if col.data_type in NUMERIC_TYPES or col.data_type in TIME_TYPES:
             continue
-        categories.append(c)
-    return sorted(categories, key=lambda c: _score_name(c.name, PREFERRED_CATEGORY_NAMES))
-
-
-def _run_scalar(pg: Any, query: str) -> str:
-    rows = _parse_csv_rows(pg.run_query(query))
-    if not rows:
-        return ""
-    first_row = rows[0]
-    if not first_row:
-        return ""
-    return str(next(iter(first_row.values())))
+        items.append(col)
+    return sorted(items, key=lambda c: _score_name(c.name, PREFERRED_CATEGORY_NAMES))
 
 
 def _run_rows(pg: Any, query: str) -> List[Dict[str, str]]:
     return _parse_csv_rows(pg.run_query(query))
+
+
+def _run_scalar(pg: Any, query: str) -> str:
+    rows = _run_rows(pg, query)
+    if not rows:
+        return ""
+    first = rows[0]
+    if not first:
+        return ""
+    return str(next(iter(first.values())))
 
 
 def _to_number(value: Any) -> int | float | str:
@@ -320,11 +280,13 @@ def _metric_sum_avg(pg: Any, qtable: str, col: ColumnInfo) -> List[Dict[str, Any
     qcol = _quote_ident(col.name)
     rows = _run_rows(
         pg,
-        f"SELECT COALESCE(SUM({qcol}), 0) AS total_value, COALESCE(AVG({qcol}), 0) AS avg_value "
+        f"SELECT COALESCE(SUM({qcol}), 0) AS total_value, "
+        f"COALESCE(AVG({qcol}), 0) AS avg_value "
         f"FROM {qtable}",
     )
     if not rows:
         return []
+
     row = rows[0]
     return [
         {
@@ -347,7 +309,8 @@ def _metric_distinct(pg: Any, qtable: str, col: ColumnInfo) -> Dict[str, Any]:
     value = _to_number(
         _run_scalar(
             pg,
-            f"SELECT COUNT(DISTINCT {qcol}) AS distinct_count FROM {qtable} WHERE {qcol} IS NOT NULL",
+            f"SELECT COUNT(DISTINCT {qcol}) AS distinct_count "
+            f"FROM {qtable} WHERE {qcol} IS NOT NULL",
         )
     )
     return {
@@ -358,68 +321,87 @@ def _metric_distinct(pg: Any, qtable: str, col: ColumnInfo) -> Dict[str, Any]:
     }
 
 
-def _make_bar_chart(chart_tool: Any, title: str, xlabel: str, ylabel: str, rows: List[Dict[str, str]]) -> Optional[Dict[str, Any]]:
+def _rows_to_dict_data(rows: List[Dict[str, str]]) -> Dict[str, int | float | str]:
     if not rows:
-        return None
-    data: Dict[str, Any] = {}
+        return {}
+
     keys = list(rows[0].keys())
     if len(keys) < 2:
-        return None
+        return {}
+
     x_key, y_key = keys[0], keys[1]
+    out: Dict[str, int | float | str] = {}
+
     for row in rows:
         label = str(row.get(x_key) or "").strip()
         if not label:
             continue
-        data[label] = _to_number(row.get(y_key))
+        out[label] = _to_number(row.get(y_key))
+
+    return out
+
+
+def _make_bar_chart(
+    chart_tool: ChartTools,
+    title: str,
+    x_label: str,
+    y_label: str,
+    rows: List[Dict[str, str]],
+) -> Optional[Dict[str, Any]]:
+    data = _rows_to_dict_data(rows)
     if not data:
         return None
+
     return {
         "title": title,
-        "echarts": chart_tool.create_bar_chart(data=data, xlabel=xlabel, ylabel=ylabel, title=title),
+        "echarts": chart_tool.create_bar_chart(
+            data=data,
+            title=title,
+            x_label=x_label,
+            y_label=y_label,
+        ),
         "note": None,
     }
 
 
-def _make_pie_chart(chart_tool: Any, title: str, xlabel: str, ylabel: str, rows: List[Dict[str, str]]) -> Optional[Dict[str, Any]]:
-    if not rows:
-        return None
-    data: Dict[str, Any] = {}
-    keys = list(rows[0].keys())
-    if len(keys) < 2:
-        return None
-    x_key, y_key = keys[0], keys[1]
-    for row in rows:
-        label = str(row.get(x_key) or "").strip()
-        if not label:
-            continue
-        data[label] = _to_number(row.get(y_key))
+def _make_line_chart(
+    chart_tool: ChartTools,
+    title: str,
+    x_label: str,
+    y_label: str,
+    rows: List[Dict[str, str]],
+) -> Optional[Dict[str, Any]]:
+    data = _rows_to_dict_data(rows)
     if not data:
         return None
+
     return {
         "title": title,
-        "echarts": chart_tool.create_pie_chart(data=data, xlabel=xlabel, ylabel=ylabel, title=title),
+        "echarts": chart_tool.create_line_chart(
+            data=data,
+            title=title,
+            x_label=x_label,
+            y_label=y_label,
+        ),
         "note": None,
     }
 
 
-def _make_line_chart(chart_tool: Any, title: str, xlabel: str, ylabel: str, rows: List[Dict[str, str]]) -> Optional[Dict[str, Any]]:
-    if not rows:
-        return None
-    data: Dict[str, Any] = {}
-    keys = list(rows[0].keys())
-    if len(keys) < 2:
-        return None
-    x_key, y_key = keys[0], keys[1]
-    for row in rows:
-        label = str(row.get(x_key) or "").strip()
-        if not label:
-            continue
-        data[label] = _to_number(row.get(y_key))
+def _make_pie_chart(
+    chart_tool: ChartTools,
+    title: str,
+    rows: List[Dict[str, str]],
+) -> Optional[Dict[str, Any]]:
+    data = _rows_to_dict_data(rows)
     if not data:
         return None
+
     return {
         "title": title,
-        "echarts": chart_tool.create_line_chart(data=data, xlabel=xlabel, ylabel=ylabel, title=title),
+        "echarts": chart_tool.create_pie_chart(
+            data=data,
+            title=title,
+        ),
         "note": None,
     }
 
@@ -428,39 +410,58 @@ def _top_category_rows(pg: Any, qtable: str, col: ColumnInfo) -> List[Dict[str, 
     qcol = _quote_ident(col.name)
     query = (
         f"SELECT {qcol} AS category, COUNT(*) AS record_count "
-        f"FROM {qtable} WHERE {qcol} IS NOT NULL "
-        f"GROUP BY {qcol} ORDER BY record_count DESC LIMIT 10"
+        f"FROM {qtable} "
+        f"WHERE {qcol} IS NOT NULL "
+        f"GROUP BY {qcol} "
+        f"ORDER BY record_count DESC "
+        f"LIMIT 10"
     )
     return _run_rows(pg, query)
 
 
-def _trend_rows(pg: Any, qtable: str, time_col: ColumnInfo, num_col: Optional[ColumnInfo]) -> List[Dict[str, str]]:
+def _trend_rows(
+    pg: Any,
+    qtable: str,
+    time_col: ColumnInfo,
+    num_col: Optional[ColumnInfo],
+) -> List[Dict[str, str]]:
     qtime = _quote_ident(time_col.name)
+
     if num_col is not None:
         qnum = _quote_ident(num_col.name)
         metric_expr = f"COALESCE(SUM({qnum}), 0)"
-        metric_name = "metric_value"
+        metric_alias = "metric_value"
     else:
         metric_expr = "COUNT(*)"
-        metric_name = "record_count"
+        metric_alias = "record_count"
 
     query = (
-        f"SELECT DATE_TRUNC('month', {qtime})::date AS period, {metric_expr} AS {metric_name} "
+        f"SELECT DATE_TRUNC('month', {qtime})::date AS period, "
+        f"{metric_expr} AS {metric_alias} "
         f"FROM {qtable} "
         f"WHERE {qtime} IS NOT NULL "
-        f"GROUP BY period ORDER BY period LIMIT 24"
+        f"GROUP BY period "
+        f"ORDER BY period "
+        f"LIMIT 24"
     )
     return _run_rows(pg, query)
 
 
-def _category_metric_rows(pg: Any, qtable: str, cat_col: ColumnInfo, num_col: ColumnInfo) -> List[Dict[str, str]]:
+def _category_metric_rows(
+    pg: Any,
+    qtable: str,
+    cat_col: ColumnInfo,
+    num_col: ColumnInfo,
+) -> List[Dict[str, str]]:
     qcat = _quote_ident(cat_col.name)
     qnum = _quote_ident(num_col.name)
     query = (
         f"SELECT {qcat} AS category, COALESCE(SUM({qnum}), 0) AS metric_total "
         f"FROM {qtable} "
         f"WHERE {qcat} IS NOT NULL "
-        f"GROUP BY {qcat} ORDER BY metric_total DESC LIMIT 10"
+        f"GROUP BY {qcat} "
+        f"ORDER BY metric_total DESC "
+        f"LIMIT 10"
     )
     return _run_rows(pg, query)
 
@@ -470,17 +471,20 @@ def _markdown_from_rows(title: str, rows: List[Dict[str, str]]) -> Optional[Dict
         return None
 
     headers = list(rows[0].keys())
-    md = []
-    md.append("| " + " | ".join(headers) + " |")
-    md.append("| " + " | ".join(["---"] * len(headers)) + " |")
-    for row in rows:
-        md.append("| " + " | ".join(str(row.get(h, "")) for h in headers) + " |")
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
 
-    return {"title": title, "markdown": "\n".join(md), "note": None}
+    for row in rows:
+        lines.append("| " + " | ".join(str(row.get(h, "")) for h in headers) + " |")
+
+    return {"title": title, "markdown": "\n".join(lines), "note": None}
 
 
 def _missing_values_table(pg: Any, qtable: str, cols: List[ColumnInfo]) -> Optional[Dict[str, Any]]:
     rows_out: List[Dict[str, str]] = []
+
     for col in cols[:5]:
         qcol = _quote_ident(col.name)
         rows = _run_rows(
@@ -490,14 +494,16 @@ def _missing_values_table(pg: Any, qtable: str, cols: List[ColumnInfo]) -> Optio
         )
         if not rows:
             continue
+
         total = int(str(rows[0].get("total_rows") or "0"))
         missing = int(str(rows[0].get("missing_count") or "0"))
-        pct = round((missing / total) * 100, 2) if total else 0.0
+        missing_pct = round((missing / total) * 100, 2) if total else 0.0
+
         rows_out.append(
             {
                 "column_name": col.name,
                 "missing_count": str(missing),
-                "missing_pct": str(pct),
+                "missing_pct": str(missing_pct),
             }
         )
 
@@ -509,27 +515,40 @@ def _build_column_descriptions(
     category_cols: List[ColumnInfo],
     time_cols: List[ColumnInfo],
 ) -> List[str]:
-    desc: List[str] = []
-    if numeric_cols:
-        for col in numeric_cols[:2]:
-            desc.append(f"{col.name}: key numeric measure useful for totals, averages, and contribution analysis.")
-    if category_cols:
-        for col in category_cols[:2]:
-            desc.append(f"{col.name}: business dimension useful for segmentation and top-N analysis.")
-    if time_cols:
-        for col in time_cols[:1]:
-            desc.append(f"{col.name}: time dimension useful for trend and seasonality analysis.")
-    return desc
+    descriptions: List[str] = []
+
+    for col in numeric_cols[:2]:
+        descriptions.append(
+            f"{col.name}: numeric business measure suitable for totals, averages, and contribution analysis."
+        )
+
+    for col in category_cols[:2]:
+        descriptions.append(
+            f"{col.name}: categorical business dimension suitable for segmentation and top-N breakdowns."
+        )
+
+    for col in time_cols[:1]:
+        descriptions.append(
+            f"{col.name}: time dimension suitable for trend and seasonality analysis."
+        )
+
+    return descriptions
 
 
-def _deterministic_notes(metrics: List[Dict[str, Any]], charts: List[Dict[str, Any]], tables: List[Dict[str, Any]]) -> List[str]:
+def _deterministic_notes(
+    metrics: List[Dict[str, Any]],
+    charts: List[Dict[str, Any]],
+    tables: List[Dict[str, Any]],
+) -> List[str]:
     notes: List[str] = []
+
     if metrics:
         notes.append(f"{len(metrics)} key metrics were generated from the selected table.")
     if charts:
-        notes.append(f"{len(charts)} business charts were generated to summarize trends and distributions.")
+        notes.append(f"{len(charts)} visual summaries were generated for business exploration.")
     if tables:
-        notes.append(f"{len(tables)} supporting summary tables were included for quick inspection.")
+        notes.append(f"{len(tables)} supporting markdown tables were included for quick inspection.")
+
     return notes[:4]
 
 
@@ -538,19 +557,22 @@ def _ai_notes(summary_agent: Optional[Agent], payload: Dict[str, Any]) -> List[s
         return _deterministic_notes(payload["metrics"], payload["charts"], payload["tables"])
 
     prompt = (
-        "Generate dashboard notes from these facts.\n"
+        "Generate short business notes from these dashboard facts.\n"
         "Return only JSON.\n\n"
         f"{json.dumps(payload, ensure_ascii=False)}"
     )
+
     try:
         out = summary_agent.run(input=prompt)
         text = _extract_content(out)
         obj = _safe_json_object(text)
         notes = obj.get("notes")
+
         if isinstance(notes, list):
             cleaned = [str(x) for x in notes if str(x).strip()]
             if cleaned:
                 return cleaned[:4]
+
     except Exception as e:
         log_error(f"Dashboard summary agent failed: {e}")
 
@@ -564,7 +586,7 @@ def build_dashboard(
     summary_agent: Optional[Agent] = None,
 ) -> Dict[str, Any]:
     pg = get_postgres_tools()
-    chart_tool = charttools()
+    chart_tool = ChartTools()
 
     qtable = _quote_table(table_name)
     columns = _parse_schema(pg, table_name)
@@ -579,6 +601,7 @@ def build_dashboard(
 
     if numeric_cols:
         metrics.extend(_metric_sum_avg(pg, qtable, numeric_cols[0]))
+
     if category_cols:
         metrics.append(_metric_distinct(pg, qtable, category_cols[0]))
 
@@ -588,66 +611,76 @@ def build_dashboard(
 
     if category_cols:
         top_rows = _top_category_rows(pg, qtable, category_cols[0])
-        chart = _make_bar_chart(
-            chart_tool,
+
+        bar_chart = _make_bar_chart(
+            chart_tool=chart_tool,
             title=f"Top {category_cols[0].name} by record count",
-            xlabel=category_cols[0].name,
-            ylabel="Count",
+            x_label=category_cols[0].name,
+            y_label="Count",
             rows=top_rows,
         )
-        if chart:
-            charts.append(chart)
+        if bar_chart:
+            charts.append(bar_chart)
 
-        pie = _make_pie_chart(
-            chart_tool,
+        pie_chart = _make_pie_chart(
+            chart_tool=chart_tool,
             title=f"{category_cols[0].name} share",
-            xlabel=category_cols[0].name,
-            ylabel="Count",
             rows=top_rows[:6],
         )
-        if pie:
-            charts.append(pie)
+        if pie_chart:
+            charts.append(pie_chart)
 
     if time_cols:
-        trend = _trend_rows(pg, qtable, time_cols[0], numeric_cols[0] if numeric_cols else None)
-        chart = _make_line_chart(
-            chart_tool,
+        trend = _trend_rows(
+            pg=pg,
+            qtable=qtable,
+            time_col=time_cols[0],
+            num_col=numeric_cols[0] if numeric_cols else None,
+        )
+        line_chart = _make_line_chart(
+            chart_tool=chart_tool,
             title=f"Trend by {time_cols[0].name}",
-            xlabel=time_cols[0].name,
-            ylabel=numeric_cols[0].name if numeric_cols else "Count",
+            x_label=time_cols[0].name,
+            y_label=numeric_cols[0].name if numeric_cols else "Count",
             rows=trend,
         )
-        if chart:
-            charts.append(chart)
+        if line_chart:
+            charts.append(line_chart)
 
     if numeric_cols and category_cols:
-        combo = _category_metric_rows(pg, qtable, category_cols[0], numeric_cols[0])
-        chart = _make_bar_chart(
-            chart_tool,
-            title=f"{numeric_cols[0].name} by {category_cols[0].name}",
-            xlabel=category_cols[0].name,
-            ylabel=numeric_cols[0].name,
-            rows=combo,
+        combo_rows = _category_metric_rows(
+            pg=pg,
+            qtable=qtable,
+            cat_col=category_cols[0],
+            num_col=numeric_cols[0],
         )
-        if chart:
-            charts.append(chart)
+        combo_chart = _make_bar_chart(
+            chart_tool=chart_tool,
+            title=f"{numeric_cols[0].name} by {category_cols[0].name}",
+            x_label=category_cols[0].name,
+            y_label=numeric_cols[0].name,
+            rows=combo_rows,
+        )
+        if combo_chart:
+            charts.append(combo_chart)
 
     charts = charts[:4]
 
     tables: List[Dict[str, Any]] = []
+
     if category_cols:
         top_rows = _top_category_rows(pg, qtable, category_cols[0])
-        top_table = _markdown_from_rows(f"Top {category_cols[0].name} Summary", top_rows)
+        top_table = _markdown_from_rows(
+            title=f"Top {category_cols[0].name} Summary",
+            rows=top_rows,
+        )
         if top_table:
             tables.append(top_table)
 
-    important_cols = []
-    if numeric_cols:
-        important_cols.extend(numeric_cols[:2])
-    if category_cols:
-        important_cols.extend(category_cols[:2])
-    if time_cols:
-        important_cols.extend(time_cols[:1])
+    important_cols: List[ColumnInfo] = []
+    important_cols.extend(numeric_cols[:2])
+    important_cols.extend(category_cols[:2])
+    important_cols.extend(time_cols[:1])
 
     missing_table = _missing_values_table(pg, qtable, important_cols)
     if missing_table:
@@ -655,277 +688,28 @@ def build_dashboard(
 
     tables = tables[:2]
 
-    column_descriptions = _build_column_descriptions(numeric_cols, category_cols, time_cols)
-
-    payload = {
+    payload: Dict[str, Any] = {
         "table": table_name,
         "session_id": session_id,
         "metrics": metrics,
         "charts": charts,
         "tables": tables,
-        "column_descriptions": column_descriptions,
+        "column_descriptions": _build_column_descriptions(numeric_cols, category_cols, time_cols),
         "notes": [],
         "raw": {
             "request_id": request_id,
-            "numeric_columns": [c.name for c in numeric_cols],
-            "category_columns": [c.name for c in category_cols],
-            "time_columns": [c.name for c in time_cols],
+            "numeric_columns": [col.name for col in numeric_cols],
+            "category_columns": [col.name for col in category_cols],
+            "time_columns": [col.name for col in time_cols],
         },
     }
 
     payload["notes"] = _ai_notes(summary_agent, payload)
 
     log_debug(
-        f"DASHBOARD builder_done table={table_name} metrics={len(payload['metrics'])} "
-        f"charts={len(payload['charts'])} tables={len(payload['tables'])}"
+        f"DASHBOARD builder_done table={table_name} "
+        f"metrics={len(payload['metrics'])} charts={len(payload['charts'])} "
+        f"tables={len(payload['tables'])}"
     )
 
     return payload
-
-
-
-
--------------------------------------------------
- src/api/models.py
-from __future__ import annotations
-
-from typing import Any, Dict, List, Optional
-
-from pydantic import BaseModel, Field
-
-
-class DashboardChart(BaseModel):
-    title: str
-    echarts: Dict[str, Any] | str
-    note: Optional[str] = None
-
-
-class DashboardTable(BaseModel):
-    title: str
-    markdown: str
-    note: Optional[str] = None
-
-
-
-class DashboardMetric(BaseModel):
-    title: str
-    value: int | float | str
-    unit: Optional[str] = 
-    None
-    note: Optional[str] = None
-
-
-class DashboardResponse(BaseModel):
-    table: str
-    session_id: Optional[str] = None
-    metrics: List[DashboardMetric] = Field(default_factory=list)
-    charts: List[DashboardChart] = Field(default_factory=list)
-    tables: List[DashboardTable] = Field(default_factory=list)
-    column_descriptions: List[str] = Field(default_factory=list)
-    notes: List[str] = Field(default_factory=list)
-    raw: Dict[str, Any] = Field(default_factory=dict)
-
---------------------------
-src/api/deps.py
-
-
-from __future__ import annotations
-
-from typing import Optional
-
-from agno.agent import Agent
-from agno.team import Team
-
-from src.api.store import InMemoryEventStore
-
-_store: Optional[InMemoryEventStore] = None
-_team: Optional[Team] = None
-_insights_agent: Optional[Agent] = None
-_dashboard_summary_agent: Optional[Agent] = None
-
-
-def init_api_dependencies(
-    *,
-    store: InMemoryEventStore,
-    team: Team,
-    insights_agent: Agent | None = None,
-    dashboard_summary_agent: Agent | None = None,
-) -> None:
-    global _store, _team, _insights_agent, _dashboard_summary_agent
-    _store = store
-    _team = team
-
-    if insights_agent is not None:
-        _insights_agent = insights_agent
-
-    if dashboard_summary_agent is not None:
-        _dashboard_summary_agent = dashboard_summary_agent
-
-
-
-def get_store() -> InMemoryEventStore:
-    if _store is None:
-        raise RuntimeError("Store dependency not initialized")
-    return _store
-
-
-def get_team() -> Team:
-    if _team is None:
-        raise RuntimeError("Team dependency not initialized")
-    return _team
-
-
-def get_insights_agent() -> Agent:
-    if _insights_agent is None:
-        raise RuntimeError("Insights agent dependency not initialized")
-    return _insights_agent
-
-
-def get_dashboard_summary_agent() -> Agent:
-    if _dashboard_summary_agent is None:
-        raise RuntimeError("Dashboard summary agent dependency not initialized")
-    return _dashboard_summary_agent
-
-----------------------------------------
-
-src/api/routes/dashboard.py
-
-from __future__ import annotations
-
-from typing import Dict, Optional
-
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-
-from agno.agent import Agent
-from agno.utils.log import log_debug, log_error
-
-from src.api.auth.rate_limiter import rate_limit
-from src.api.auth.security import get_current_user
-from src.api.deps import get_dashboard_summary_agent, get_store
-from src.api.models import DashboardResponse
-from src.api.services.dashboard_builder import build_dashboard
-from src.api.store import InMemoryEventStore
-
-router = APIRouter(prefix="/api", tags=["dashboard"])
-
-
-@router.get("/dashboard", response_model=DashboardResponse)
-def get_dashboard(
-    request: Request,
-    table_name: str = Query(..., min_length=1, description="Selected table e.g. public.orders"),
-    session_id: Optional[str] = Query(default=None, description="Session id for stateful UX"),
-    store: InMemoryEventStore = Depends(get_store),
-    dashboard_summary_agent: Agent = Depends(get_dashboard_summary_agent),
-    user=Depends(get_current_user),
-) -> Dict[str, object]:
-    request_id = getattr(request.state, "request_id", "unknown")
-    sid = session_id or "default"
-    table = table_name.strip()
-
-    rate_limit(user["user_id"])
-    store.set_session_value(sid, "selected_table", table)
-
-    log_debug(
-        f"DASHBOARD request_start request_id={request_id} "
-        f"session_id={sid} table={table} user_id={user['user_id']}"
-    )
-
-    store.add(
-        type="dashboard_request",
-        session_id=sid,
-        payload={
-            "request_id": request_id,
-            "table_name": table,
-            "user_id": user["user_id"],
-        },
-    )
-
-    try:
-        response = build_dashboard(
-            table_name=table,
-            session_id=sid,
-            request_id=request_id,
-            summary_agent=dashboard_summary_agent,
-        )
-    except Exception as e:
-        log_error(
-            f"DASHBOARD request_failed request_id={request_id} "
-            f"session_id={sid} table={table} error={e}"
-        )
-        store.add(
-            type="dashboard_error",
-            session_id=sid,
-            payload={
-                "request_id": request_id,
-                "table_name": table,
-                "user_id": user["user_id"],
-                "error": str(e),
-            },
-        )
-        raise HTTPException(status_code=500, detail=f"Failed to generate dashboard: {e}")
-
-    store.add(
-        type="dashboard_response",
-        session_id=sid,
-        payload={
-            "request_id": request_id,
-            "table_name": table,
-            "user_id": user["user_id"],
-            "metrics": len(response["metrics"]),
-            "charts": len(response["charts"]),
-            "tables": len(response["tables"]),
-        },
-    )
-
-    log_debug(
-        f"DASHBOARD request_done request_id={request_id} session_id={sid} "
-        f"table={table} metrics={len(response['metrics'])} "
-        f"charts={len(response['charts'])} tables={len(response['tables'])}"
-    )
-
-    return response
-    --------------------------------
-
-
-
-from __future__ import annotations
-
-from fastapi import FastAPI
-from agno.os import AgentOS
-
-from src.agents.dashboard_summary_agent import create_dashboard_summary_agent
-from src.agents.insights_agent import create_insights_agent
-from src.api.app_factory import create_app
-from src.api.orchestrator_team import build_default_team
-from src.api.store import InMemoryEventStore
-
-# Existing agents
-from src.agents import Agent1, Agent2, Agent3  # adjust imports to your repo
-
-
-agent_1 = Agent1()
-agent_2 = Agent2()
-agent_3 = Agent3()
-
-agent_os = AgentOS(
-    description="Agno AgentOS Backend",
-    agents=[agent_1, agent_2, agent_3],
-)
-
-base_app = agent_os.get_app()
-
-store = InMemoryEventStore(max_events=5000)
-team = build_default_team()
-insights_agent = create_insights_agent()
-dashboard_summary_agent = create_dashboard_summary_agent()
-
-app: FastAPI = create_app(
-    base_app=base_app,
-    store=store,
-    team=team,
-    insights_agent=insights_agent,
-    dashboard_summary_agent=dashboard_summary_agent,
-)
-
-if __name__ == "__main__":
-    agent_os.serve(app="main:app", host="0.0.0.0", port=9999, reload=True)
