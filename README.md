@@ -1,3028 +1,155 @@
-# 3. Detailed Cache Design
+# 5. Infrastructure and Deployment Plan
 
-## 3.1 Purpose of This Section
+## 5.1 Purpose of This Section
 
-This section defines exactly:
+This section defines:
 
-- what should be cached,
-- what should not be cached,
-- where caching should happen,
-- how Redis keys should be constructed,
-- how long data should remain cached,
-- how cache invalidation should work,
-- how the six-month data refresh should be handled,
-- and how the application should behave under concurrency and failure.
+- what infrastructure must exist,
+- what must run locally,
+- what must run in DEV,
+- what must run in STAGE,
+- what must run in PROD,
+- what DevOps / platform teams need to provision,
+- what configuration the backend requires,
+- and how Redis should connect to the AKS-hosted backend.
 
-The objective is to avoid treating Redis as:
-
-```text
-"Put everything in Redis."
-```
-
-Instead, Redis must be used deliberately.
+The objective is to ensure that the application architecture and the infrastructure architecture remain aligned.
 
 ---
 
-# 3.2 Core Caching Principle
+# 5.2 Infrastructure Components
 
-The application should follow this rule:
-
-> Cache data that is expensive or unnecessary to repeatedly retrieve or compute, provided that the result can be safely reconstructed from the source of truth.
-
-For this application:
+The complete system will contain the following major components:
 
 ```text
-Cosmos DB
-    =
-Source of Truth
-
-Redis
-    =
-Reusable Temporary Copy
-```
-
-The application must always be capable of reconstructing Redis data from Cosmos.
-
----
-
-# 3.3 Recommended Initial Caching Scope
-
-The first implementation should focus on:
-
-```text
-Cosmos-derived domain data
-```
-
-Examples may include:
-
-- employer-level data,
-- plan data,
-- plan metadata,
-- plan configuration,
-- reference data,
-- normalized values,
-- static mappings.
-
-The exact objects depend on the application's current Cosmos schema.
-
-The safest first phase is:
-
-> Cache the reusable data obtained from Cosmos before introducing response caching or broad agent-level caching.
-
----
-
-# 3.4 What Should Be Cached Initially
-
-Consider a simplified scenario where Cosmos contains:
-
-```text
-Employer
-    ↓
-Plans
-    ↓
-Plan Attributes
-```
-
-Example:
-
-```text
-Employer A
-    ├── Plan A1
-    ├── Plan A2
-    ├── Plan A3
-    └── Plan A4
-```
-
-If the agent repeatedly requires these plans, this is a strong cache candidate.
-
-The flow becomes:
-
-```text
-Agent needs Employer A plans
+Frontend / Consumer
 
         ↓
 
-Check Redis
+AKS Ingress / Service
 
         ↓
 
-If available:
-    use cached data
+Backend Deployment
 
-If unavailable:
-    query Cosmos
-    cache the result
-    return the result
-```
-
----
-
-# 3.5 Cache Based on Access Pattern, Not Database Structure
-
-A common mistake is to mirror every Cosmos document directly into one Redis key.
-
-Example:
-
-```text
-Cosmos Document 1
-        ↓
-Redis Key 1
-
-Cosmos Document 2
-        ↓
-Redis Key 2
-
-Cosmos Document 3
-        ↓
-Redis Key 3
-```
-
-This is not always the best approach.
-
-The cache structure should instead reflect:
-
-> How the application actually requests the data.
-
----
-
-## 3.6 Example: Cache Individual Plans
-
-Suppose the application usually requests one plan at a time.
-
-Then this may be appropriate:
-
-```text
-plan:2026_09:employer_a:plan_1
-
-plan:2026_09:employer_a:plan_2
-
-plan:2026_09:employer_a:plan_3
-```
-
-This allows individual plan retrieval.
-
----
-
-## 3.7 Example: Cache Employer-Level Plan Collection
-
-Suppose nearly every agent request retrieves all plans for one employer.
-
-Then this may be better:
-
-```text
-employer-plans:2026_09:employer_a
-```
-
-The value may contain:
-
-```json
-{
-  "employer_id": "employer_a",
-  "plans": [
-    {
-      "plan_id": "plan_1"
-    },
-    {
-      "plan_id": "plan_2"
-    },
-    {
-      "plan_id": "plan_3"
-    }
-  ]
-}
-```
-
-This can reduce:
-
-```text
-multiple Redis GET operations
-```
-
-into:
-
-```text
-one Redis GET
-```
-
----
-
-# 3.8 Recommended Rule for Cache Granularity
-
-When selecting cache granularity, ask:
-
-```text
-"What does the agent normally need together?"
-```
-
-If the application normally needs:
-
-```text
-all plans belonging to one employer
-```
-
-cache them together.
-
-If it normally needs:
-
-```text
-only one plan
-```
-
-cache individual plans.
-
-The goal should not be:
-
-```text
-Mirror Cosmos
-```
-
-The goal should be:
-
-```text
-Optimize Application Access Pattern
-```
-
----
-
-# 3.9 What Should Not Be Cached Initially
-
-The first implementation should avoid caching:
-
-- arbitrary final LLM responses,
-- entire conversation histories,
-- user-specific sensitive information,
-- temporary agent reasoning state,
-- request-specific intermediate state that cannot safely be reused,
-- values whose cache identity cannot be deterministically defined,
-- rapidly changing information,
-- errors unless negative caching is explicitly designed,
-- extremely large objects without evaluating Redis memory impact.
-
----
-
-# 3.10 Why Final Agent Responses Should Not Initially Be Cached
-
-Suppose the user asks:
-
-```text
-Which plan is better for me?
-```
-
-Caching the final response may look attractive.
-
-However, that response may depend on:
-
-```text
-Employer
-
-Selected plans
-
-Current user context
-
-Refinement options
-
-Conversation history
-
-Prompt version
-
-Agent version
-
-Business rules
-
-Calculation logic
-
-User-entered optional information
-```
-
-Two requests that appear similar may actually be different.
-
-Example:
-
-```text
-User 1:
-Which plan is better?
-
-Employer:
-A
-
-Coverage:
-Employee Only
-```
-
-and:
-
-```text
-User 2:
-Which plan is better?
-
-Employer:
-A
-
-Coverage:
-Family
-```
-
-Caching the final answer incorrectly could return the wrong recommendation.
-
-Therefore:
-
-> Final LLM response caching should not be part of the initial Redis implementation.
-
-It can be evaluated later as a separate optimization.
-
----
-
-# 3.11 Recommended Initial Cache Layers
-
-The application may eventually support two cache layers.
-
-```text
-Layer 1
-    ↓
-Raw / normalized Cosmos data
-
-Layer 2
-    ↓
-Deterministic computation results
-```
-
-The first implementation should prioritize Layer 1.
-
----
-
-# 3.12 Layer 1 — Data Cache
-
-Example:
-
-```text
-Redis Key:
-
-employer-plans:2026_09:employer_a
-```
-
-Value:
-
-```json
-{
-  "employer_id": "employer_a",
-  "plans": [...]
-}
-```
-
-This prevents repeated Cosmos retrieval.
-
----
-
-# 3.13 Layer 2 — Computation Cache
-
-Suppose the application performs a deterministic operation such as:
-
-```text
-Fetch plans
-
-    ↓
-
-Normalize plans
-
-    ↓
-
-Apply business rules
-
-    ↓
-
-Calculate values
-
-    ↓
-
-Generate ranking
-```
-
-If the same inputs always produce the same output, the calculated result may eventually be cached.
-
-Example:
-
-```text
-plan-ranking:2026_09:employer_a:employee_only
-```
-
-However, this should only be added after measuring whether the computation itself is expensive.
-
----
-
-# 3.14 Avoid Premature Multi-Level Caching
-
-Do not immediately introduce:
-
-```text
-Raw Cache
-
-Normalized Cache
-
-Calculation Cache
-
-Agent Tool Cache
-
-Prompt Cache
-
-Response Cache
-```
-
-This creates too many invalidation rules.
-
-The initial implementation should remain simple.
-
-Recommended first phase:
-
-```text
-Redis
-    ↓
-Cache Cosmos-derived reusable data
-```
-
-Then measure.
-
-Only add other cache layers when there is evidence that they are required.
-
----
-
-# 3.15 Redis Key Design
-
-Redis keys should be:
-
-- deterministic,
-- predictable,
-- versioned,
-- easy to inspect,
-- easy to debug,
-- namespaced,
-- safe across environments.
-
-A good general pattern is:
-
-```text
-<application>:<environment>:<dataset-version>:<entity>:<identifier>
-```
-
-Example:
-
-```text
-plan-agent:prod:2026_09:employer-plans:employer_a
-```
-
-Another valid simpler pattern is:
-
-```text
-employer-plans:2026_09:employer_a
-```
-
-The exact prefix should be standardized once for the project.
-
----
-
-# 3.16 Recommended Cache Key Format
-
-Recommended format:
-
-```text
-<app>:<env>:<dataset-version>:<resource>:<resource-id>
-```
-
-Example:
-
-```text
-benefits-agent:prod:2026_09:employer-plans:apple
-```
-
-Example individual plan:
-
-```text
-benefits-agent:prod:2026_09:plan:apple:gold-ppo
-```
-
-Example calculation:
-
-```text
-benefits-agent:prod:2026_09:ranking:apple:employee-only
-```
-
----
-
-# 3.17 Why Environment Should Be in the Key
-
-Normally DEV, STAGE and PROD should use separate Redis instances.
-
-Even then, including the environment in the key provides additional protection.
-
-Example:
-
-```text
-benefits-agent:dev:...
-benefits-agent:stage:...
-benefits-agent:prod:...
-```
-
-This makes debugging easier and reduces accidental collision if infrastructure is temporarily shared.
-
----
-
-# 3.18 Dataset Versioning
-
-The Cosmos data changes approximately once every six months.
-
-This makes dataset versioning extremely useful.
-
-Suppose the current dataset is:
-
-```text
-2026_09
-```
-
-Keys can be:
-
-```text
-benefits-agent:prod:2026_09:employer-plans:apple
-```
-
-Six months later, new data is deployed:
-
-```text
-2027_03
-```
-
-The application begins reading:
-
-```text
-benefits-agent:prod:2027_03:employer-plans:apple
-```
-
-The application no longer reads:
-
-```text
-benefits-agent:prod:2026_09:employer-plans:apple
-```
-
----
-
-# 3.19 Why Versioning Is Better Than Deleting Every Key
-
-Without versioning, data refresh may require:
-
-```text
-Find all Redis keys
+FastAPI + Custom ADK Agent
 
         ↓
 
-Delete all old keys
+   ┌───────────────┐
+   │               │
+   ▼               ▼
 
-        ↓
+Redis            Cosmos DB
 
-Hope none were missed
+Cache            Source of Truth
 ```
 
-This can be risky.
-
-Versioning changes the problem to:
-
-```text
-Change DATASET_VERSION
-
-        ↓
-
-Application automatically starts using new namespace
-```
-
-The old data becomes unreachable by normal application requests.
-
-Later, old keys can expire naturally.
+The existing framework Memory Server may continue to exist independently, but it is not part of this caching architecture.
 
 ---
 
-# 3.20 Dataset Version Source
+# 5.3 Services That Need to Exist
 
-The dataset version must not be manually hard-coded throughout the application.
+The target platform requires the following services.
 
-It should come from configuration.
+### Backend Service
 
-Example:
-
-```env
-DATASET_VERSION=2026_09
-```
-
-Application configuration:
-
-```python
-settings.dataset_version
-```
-
-Cache key generation should consume this value.
-
----
-
-# 3.21 Dataset Refresh Procedure
-
-A future data refresh can follow:
-
-```text
-Step 1
-
-Load the new dataset into Cosmos.
-
-
-Step 2
-
-Validate the new Cosmos dataset.
-
-
-Step 3
-
-Update application configuration:
-
-DATASET_VERSION=2027_03
-
-
-Step 4
-
-Deploy/restart application with new configuration.
-
-
-Step 5
-
-Application starts generating new Redis keys.
-
-
-Step 6
-
-First requests cause cache misses.
-
-
-Step 7
-
-New cache is populated from new Cosmos data.
-
-
-Step 8
-
-Old cache entries expire naturally.
-```
-
-This approach greatly simplifies invalidation.
-
----
-
-# 3.22 TTL Strategy
-
-Even though the data may change only once every six months, Redis values should still have a TTL.
-
-TTL means:
-
-```text
-Time To Live
-```
-
-Example:
-
-```text
-TTL = 7 days
-```
-
-means Redis automatically removes the cached value after seven days.
-
----
-
-# 3.23 Why TTL Is Still Needed
-
-One might ask:
-
-```text
-"If the data changes only every six months,
-why not cache it forever?"
-```
-
-Because Redis is a cache.
-
-A TTL provides:
-
-- automatic cleanup,
-- protection against forgotten keys,
-- cleanup of unused employers/plans,
-- protection against key-version mistakes,
-- natural recovery from stale cache,
-- simpler operational management.
-
----
-
-# 3.24 Initial TTL Recommendation
-
-An initial TTL could be:
-
-```text
-7 days
-```
-
-or:
-
-```text
-30 days
-```
-
-The exact value should be selected based on:
-
-- Redis memory capacity,
-- number of cacheable entities,
-- cache reuse frequency,
-- expected data size,
-- acceptable periodic Cosmos traffic.
-
-Because the dataset changes very rarely, a long TTL is reasonable.
-
----
-
-# 3.25 Recommended Starting Point
-
-A reasonable starting configuration is:
-
-```env
-CACHE_TTL_SECONDS=604800
-```
-
-which means:
-
-```text
-7 days
-```
-
-Alternatively:
-
-```env
-CACHE_TTL_SECONDS=2592000
-```
-
-which means:
-
-```text
-30 days
-```
-
-The value should remain configurable.
-
-It should not be hard-coded into business logic.
-
----
-
-# 3.26 Versioning + TTL Together
-
-The recommended strategy is:
-
-```text
-Dataset Version
-        +
-TTL
-```
-
-Example:
-
-```text
-benefits-agent:prod:2026_09:employer-plans:apple
-
-TTL:
-7 days
-```
-
-If the dataset changes:
-
-```text
-2026_09
-    ↓
-2027_03
-```
-
-the application immediately starts using the new namespace.
-
-TTL then cleans up the old namespace.
-
----
-
-# 3.27 Cache Invalidation Strategy
-
-Cache invalidation should remain as simple as possible.
-
-The primary invalidation mechanisms should be:
-
-### Mechanism 1
-
-TTL expiration.
-
-### Mechanism 2
-
-Dataset version change.
-
-### Mechanism 3
-
-Explicit delete for exceptional cases.
-
----
-
-# 3.28 Explicit Cache Invalidation
-
-There may be situations where one employer's data needs immediate refresh.
-
-For example:
-
-```text
-Employer A plan data was corrected.
-```
-
-In that situation, the application or an administrative process may delete:
-
-```text
-benefits-agent:prod:2026_09:employer-plans:employer_a
-```
-
-The next request causes:
-
-```text
-Redis miss
-    ↓
-Cosmos query
-    ↓
-Redis repopulated
-```
-
----
-
-# 3.29 Avoid FLUSHALL
-
-The application should never depend on:
-
-```text
-FLUSHALL
-```
-
-for ordinary cache maintenance.
-
-`FLUSHALL` deletes the entire Redis database.
-
-This is unnecessarily broad and dangerous.
-
-Prefer:
-
-```text
-versioned keys
-```
-
-or targeted deletion.
-
----
-
-# 3.30 Cache Serialization
-
-Redis values must be serialized.
-
-Recommended initial format:
-
-```text
-JSON
-```
-
-Example:
-
-```python
-json.dumps(value)
-```
-
-and:
-
-```python
-json.loads(value)
-```
-
-If the application already uses Pydantic models, serialization may use:
-
-```python
-model.model_dump_json()
-```
-
-and equivalent reconstruction logic.
-
----
-
-# 3.31 Do Not Cache Mutable Python Objects Directly
-
-Do not assume Python objects can simply be placed into Redis.
-
-Redis stores:
-
-```text
-strings / bytes / Redis-native structures
-```
-
-Therefore the application should explicitly serialize and deserialize.
-
----
-
-# 3.32 Large Value Considerations
-
-Before caching extremely large JSON objects, measure:
-
-```text
-Serialized size
-
-Number of keys
-
-Expected number of cached employers
-
-Expected Redis memory usage
-```
-
-Example:
-
-```text
-10 MB per employer
-×
-500 employers
-=
-5 GB
-```
-
-This may significantly affect Redis sizing.
-
-Therefore observability should eventually capture approximate cache value size where practical.
-
----
-
-# 3.33 Cache Miss Behaviour
-
-A cache miss is not an error.
-
-It is normal behaviour.
-
-Logs should distinguish:
-
-```text
-CACHE_HIT
-CACHE_MISS
-CACHE_ERROR
-```
-
-A miss means:
-
-```text
-Redis is working.
-
-The requested data simply isn't cached yet.
-```
-
----
-
-# 3.34 Cache Error Behaviour
-
-A Redis exception is different from a cache miss.
-
-Example:
-
-```text
-Connection timeout
-
-Authentication failure
-
-Network error
-
-Redis unavailable
-```
-
-These should be treated as:
-
-```text
-CACHE_ERROR
-```
-
-The request should then fall back to Cosmos when possible.
-
----
-
-# 3.35 Negative Caching
-
-Negative caching means caching the fact that something does not exist.
-
-Example:
-
-```text
-Employer XYZ requested
-
-Cosmos returns:
-Not Found
-```
-
-Without negative caching:
-
-```text
-Request 1 → Cosmos → Not Found
-Request 2 → Cosmos → Not Found
-Request 3 → Cosmos → Not Found
-Request 100 → Cosmos → Not Found
-```
-
-A short negative cache could store:
-
-```text
-Employer XYZ does not exist
-```
-
-for perhaps:
-
-```text
-30 seconds
-or
-5 minutes
-```
-
-However, negative caching should **not** be included in the first implementation unless repeated invalid requests become a measurable issue.
-
-It adds additional semantics and should be introduced deliberately.
-
----
-
-# 3.36 Cache Stampede / Thundering Herd
-
-Consider what happens when a popular cache key expires.
-
-Suppose:
-
-```text
-100 requests arrive simultaneously.
-```
-
-All perform:
-
-```text
-Redis GET
-```
-
-All receive:
-
-```text
-MISS
-```
-
-Then all 100 requests query Cosmos simultaneously.
-
-```mermaid
-flowchart TD
-
-    R[100 Concurrent Requests]
-
-    REDIS[Redis Key Expired]
-
-    COSMOS[(Cosmos DB)]
-
-    R --> REDIS
-
-    REDIS -->|100 Cache Misses| COSMOS
-```
-
-This is called:
-
-```text
-Cache Stampede
-```
-
-or:
-
-```text
-Thundering Herd
-```
-
----
-
-# 3.37 Initial Cache Stampede Strategy
-
-Do not over-engineer the first implementation.
-
-Initially:
-
-```text
-Cache Aside
-+
-Long TTL
-+
-Monitoring
-```
-
-may be sufficient.
-
-If production metrics show stampede behaviour, introduce request coalescing or a distributed lock.
-
----
-
-# 3.38 Possible Future Stampede Protection
-
-Example:
-
-```text
-Request gets cache miss
-
-        ↓
-
-Try distributed lock
-
-        ↓
-
-Lock acquired?
-```
-
-If yes:
-
-```text
-Query Cosmos
-Populate Redis
-Release lock
-```
-
-If no:
-
-```text
-Wait briefly
-
-        ↓
-
-Check Redis again
-```
-
-Redis can support the lock using:
-
-```text
-SET key value NX EX <seconds>
-```
-
-However:
-
-> Distributed locking is not required for the initial implementation unless load testing demonstrates the need.
-
----
-
-# 3.39 TTL Jitter
-
-Another future improvement is TTL jitter.
-
-If thousands of keys are all created at the same time with exactly:
-
-```text
-TTL = 604800
-```
-
-they may all expire together seven days later.
-
-Instead:
-
-```text
-Base TTL:
-7 days
-
-Random Jitter:
-0–30 minutes
-```
-
-Then different keys expire at slightly different times.
-
-Example:
-
-```text
-Key A:
-7 days + 3 minutes
-
-Key B:
-7 days + 17 minutes
-
-Key C:
-7 days + 26 minutes
-```
-
-This reduces synchronized cache expiry.
-
-This can be added if necessary.
-
----
-
-# 3.40 Caching Deterministic Computations
-
-After the data cache is stable, the team may evaluate computation caching.
-
-Only cache a computation when:
-
-```text
-Same Inputs
-     ↓
-Always
-     ↓
-Same Output
-```
-
-For example:
-
-```text
-Employer
-+
-Plan
-+
-Coverage Tier
-+
-Dataset Version
-+
-Business Rule Version
-```
-
-may produce a deterministic calculation.
-
----
-
-# 3.41 Computation Cache Key Must Include All Relevant Inputs
-
-Bad:
-
-```text
-ranking:apple
-```
-
-If rankings differ by coverage type, this key is incorrect.
-
-Better:
-
-```text
-ranking:2026_09:apple:employee-only
-```
-
-If business logic changes independently of dataset changes, add:
-
-```text
-rule-version
-```
-
-Example:
-
-```text
-ranking:2026_09:rules-v3:apple:employee-only
-```
-
-Otherwise old calculated results may survive after code logic changes.
-
----
-
-# 3.42 LLM Outputs Are Not Automatically Deterministic
-
-Even if the same prompt is submitted twice, LLM output can differ.
-
-Therefore:
-
-> Do not treat LLM output like deterministic business computation.
-
-Response caching requires a separate design and is intentionally outside the initial implementation.
-
----
-
-# 3.43 Sensitive Data Rule
-
-Before adding any Redis key/value, ask:
-
-```text
-"Is this safe to cache?"
-```
-
-Do not casually cache:
-
-- user-entered personal information,
-- sensitive request context,
-- authentication tokens,
-- authorization data,
-- secrets,
-- credentials.
-
-The initial cache should primarily contain shared domain/reference data derived from Cosmos.
-
----
-
-# 3.44 Multi-Tenant Key Isolation
-
-If the application serves multiple employers or tenants, cache keys must include the tenant/employer identifier where required.
-
-Bad:
-
-```text
-plans:gold-ppo
-```
-
-Potentially ambiguous.
-
-Better:
-
-```text
-plans:2026_09:employer_a:gold-ppo
-```
-
-This prevents one tenant's cached data from being accidentally used for another.
-
----
-
-# 3.45 Cache Key Normalization
-
-Identifiers used in keys should be normalized consistently.
-
-For example:
-
-```text
-APPLE
-Apple
-apple
-```
-
-should not accidentally become three independent cache namespaces unless they actually represent different identifiers.
-
-Normalization could include:
-
-```python
-employer_id.strip().lower()
-```
-
-However, normalization rules should match the application's authoritative identifiers.
-
-Do not transform IDs in a way that changes their meaning.
-
----
-
-# 3.46 Redis Is Not Agent Memory
-
-Even though Redis can technically store:
-
-```text
-conversation history
-sessions
-agent state
-```
-
-that is not the goal of this implementation.
-
-The initial Redis contract is:
-
-```text
-Redis
-    =
-Application Cache
-```
-
-The existing framework memory server remains a separate concern.
-
----
-
-# 3.47 Recommended Phase-1 Cache Scope
-
-Phase 1 should contain:
-
-```text
-1. Cosmos-derived shared data caching
-
-2. Versioned keys
-
-3. Configurable TTL
-
-4. Graceful Redis failure
-
-5. Metrics for hits/misses/errors
-
-6. Shared cache across backend replicas
-```
-
-Phase 1 should **not** contain:
-
-```text
-1. LLM response cache
-
-2. Conversation memory
-
-3. Distributed locks unless required
-
-4. Complex multi-level cache
-
-5. Redis persistence dependency
-
-6. Redis as a database
-```
-
----
-
-# 3.48 Cache Design Summary
-
-The recommended cache model is therefore:
-
-```mermaid
-flowchart TD
-
-    AGENT[Agent]
-
-    SERVICE[Domain Service]
-
-    CACHE[Cache Service]
-
-    REDIS[(Redis)]
-
-    COSMOS[(Cosmos DB)]
-
-    COMPUTE[Business Computation]
-
-    AGENT --> SERVICE
-
-    SERVICE --> CACHE
-
-    CACHE --> REDIS
-
-    REDIS -->|Hit| SERVICE
-
-    REDIS -->|Miss| COSMOS
-
-    COSMOS --> CACHE
-
-    CACHE --> REDIS
-
-    SERVICE --> COMPUTE
-```
-
-The conceptual rule remains:
-
-```text
-Redis first
-
-If cache hit:
-    use it.
-
-If cache miss:
-    Cosmos.
-
-If Redis fails:
-    Cosmos.
-
-Cosmos always remains authoritative.
-```
-
----
-
-# 4. Code Implementation Plan
-
-## 4.1 Purpose of This Section
-
-This section defines the changes required in the Python/FastAPI application.
-
-It is intended to provide enough structure that:
-
-- developers know which files to change,
-- Copilot understands the intended architecture,
-- Redis integration does not leak throughout the agent code,
-- environment-specific configuration remains separated from application logic.
-
----
-
-# 4.2 Implementation Principle
-
-The implementation must preserve this dependency direction:
+Contains:
 
 ```text
 FastAPI
-   ↓
-Agent
-   ↓
-Domain Service
-   ↓
-Cache Abstraction
-   ↓
-Redis
-```
-
-and:
-
-```text
-Domain Service
-   ↓
-Repository
-   ↓
-Cosmos
-```
-
-The agent should not contain infrastructure logic.
-
----
-
-# 4.3 Dependency Direction
-
-Recommended:
-
-```mermaid
-flowchart TD
-
-    ROUTE[FastAPI Route]
-
-    AGENT[Custom ADK Agent]
-
-    DOMAIN[Domain Service]
-
-    CACHE[Cache Service]
-
-    REDISCLIENT[Redis Client]
-
-    REPO[Cosmos Repository]
-
-    REDIS[(Redis)]
-
-    COSMOS[(Cosmos DB)]
-
-    ROUTE --> AGENT
-
-    AGENT --> DOMAIN
-
-    DOMAIN --> CACHE
-
-    DOMAIN --> REPO
-
-    CACHE --> REDISCLIENT
-
-    REDISCLIENT --> REDIS
-
-    REPO --> COSMOS
-```
-
----
-
-# 4.4 Python Redis Library
-
-Use the standard Python Redis client:
-
-```text
-redis
-```
-
-with asynchronous support through:
-
-```python
-redis.asyncio
-```
-
-Example import:
-
-```python
-import redis.asyncio as redis
-```
-
-The backend already uses asynchronous FastAPI behaviour, therefore blocking Redis calls should be avoided.
-
----
-
-# 4.5 Dependency Addition
-
-Add the Redis Python package to the project's dependency management.
-
-Depending on the repository, this may be:
-
-```text
-requirements.txt
-```
-
-or:
-
-```text
-pyproject.toml
-```
-
-or equivalent.
-
-Example concept:
-
-```text
-redis
-```
-
-Do not independently introduce multiple Redis libraries unless required.
-
-The entire application should use one Redis client implementation.
-
----
-
-# 4.6 Configuration Required
-
-The application should receive Redis configuration through environment variables/settings.
-
-Recommended configuration:
-
-```env
-CACHE_ENABLED=true
-
-REDIS_HOST=localhost
-
-REDIS_PORT=6379
-
-REDIS_SSL=false
-
-REDIS_DB=0
-
-REDIS_CONNECT_TIMEOUT_SECONDS=2
-
-REDIS_SOCKET_TIMEOUT_SECONDS=2
-
-REDIS_MAX_CONNECTIONS=50
-
-CACHE_TTL_SECONDS=604800
-
-DATASET_VERSION=2026_09
-
-CACHE_KEY_PREFIX=benefits-agent
-```
-
-Authentication configuration will depend on the Azure setup.
-
-Possible additional configuration:
-
-```env
-REDIS_USERNAME=
-
-REDIS_PASSWORD=
-```
-
-or identity-based configuration.
-
----
-
-# 4.7 Configuration Must Be Centralized
-
-Do not use:
-
-```python
-os.getenv("REDIS_HOST")
-```
-
-throughout random files.
-
-Instead centralize application configuration.
-
-Example:
-
-```python
-from pydantic_settings import BaseSettings
-
-
-class Settings(BaseSettings):
-
-    cache_enabled: bool = True
-
-    redis_host: str = "localhost"
-
-    redis_port: int = 6379
-
-    redis_ssl: bool = False
-
-    redis_db: int = 0
-
-    redis_connect_timeout_seconds: float = 2.0
-
-    redis_socket_timeout_seconds: float = 2.0
-
-    redis_max_connections: int = 50
-
-    cache_ttl_seconds: int = 604800
-
-    dataset_version: str
-
-    cache_key_prefix: str = "benefits-agent"
-```
-
-Existing project configuration conventions should be reused if already available.
-
----
-
-# 4.8 Same Code Across Environments
-
-The application code should remain identical between:
-
-```text
-LOCAL
-
-DEV
-
-STAGE
-
-PROD
-```
-
-Only configuration should change.
-
-Example:
-
-### LOCAL
-
-```env
-REDIS_HOST=localhost
-REDIS_PORT=6379
-REDIS_SSL=false
-```
-
-### DEV
-
-```env
-REDIS_HOST=<dev-redis-host>
-REDIS_PORT=<configured-port>
-REDIS_SSL=true
-```
-
-### STAGE
-
-```env
-REDIS_HOST=<stage-redis-host>
-REDIS_SSL=true
-```
-
-### PROD
-
-```env
-REDIS_HOST=<prod-redis-host>
-REDIS_SSL=true
-```
-
-No branching should exist like:
-
-```python
-if environment == "prod":
-    use_redis()
-else:
-    use_something_else()
-```
-
-unless there is a genuine requirement.
-
----
-
-# 4.9 Cache Enable / Disable Switch
-
-A configuration switch should exist:
-
-```env
-CACHE_ENABLED=true
-```
-
-This is useful for:
-
-- debugging,
-- local development,
-- comparison testing,
-- emergency rollback,
-- benchmarking.
-
-If:
-
-```env
-CACHE_ENABLED=false
-```
-
-the application should bypass Redis and use Cosmos normally.
-
-Example:
-
-```text
-CACHE_ENABLED=false
-
-Agent
-  ↓
-Domain Service
-  ↓
-Cosmos
-```
-
----
-
-# 4.10 Redis Client Lifecycle
-
-Do not create a Redis client inside every request.
-
-Bad:
-
-```python
-@app.post("/chat")
-async def chat(...):
-
-    client = redis.Redis(...)
-
-    ...
-```
-
-Every incoming request would unnecessarily create connection state.
-
----
-
-# 4.11 Preferred Lifecycle
-
-Create Redis client infrastructure once during application startup.
-
-Reuse it across requests handled by that pod.
-
-Then clean it up during application shutdown.
-
-Conceptually:
-
-```text
-Pod Starts
-
-    ↓
-
-FastAPI startup
-
-    ↓
-
-Create Redis client / pool
-
-    ↓
-
-Handle many requests
-
-    ↓
-
-Pod shutdown
-
-    ↓
-
-Close Redis connection resources
-```
-
----
-
-# 4.12 FastAPI Lifespan Integration
-
-If the application already uses a FastAPI lifespan function, extend that existing function instead of creating competing startup mechanisms.
-
-Example:
-
-```python
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-
-    app.state.redis = await create_redis_client()
-
-    try:
-        yield
-
-    finally:
-        if app.state.redis:
-            await app.state.redis.aclose()
-
-
-app = FastAPI(
-    lifespan=lifespan
-)
-```
-
-This is conceptual code.
-
-It should be adapted to the existing application startup pattern.
-
----
-
-# 4.13 Redis Client Factory
-
-Create a dedicated function or class responsible for Redis client creation.
-
-Example:
-
-```python
-import redis.asyncio as redis
-
-
-def create_redis_client(settings):
-
-    return redis.Redis(
-        host=settings.redis_host,
-        port=settings.redis_port,
-        db=settings.redis_db,
-        ssl=settings.redis_ssl,
-        socket_connect_timeout=(
-            settings.redis_connect_timeout_seconds
-        ),
-        socket_timeout=(
-            settings.redis_socket_timeout_seconds
-        ),
-        max_connections=(
-            settings.redis_max_connections
-        ),
-        decode_responses=True
-    )
-```
-
-Authentication fields can be added according to the approved environment design.
-
----
-
-# 4.14 Connection Pooling
-
-Redis connections should be pooled.
-
-Conceptually:
-
-```text
-Backend Pod
-
-FastAPI
-    ↓
-
++
+Custom ADK Agent
++
+Application Logic
++
 Redis Client
-    ↓
-
-Connection Pool
-    ├── Connection 1
-    ├── Connection 2
-    ├── Connection 3
-    └── ...
++
+Cosmos Client
 ```
 
-The pool is shared by requests inside that pod.
-
-Each backend pod will maintain its own Redis connection pool.
-
-Example:
-
-```text
-Pod 1
-    ↓
-Pool 1
-       \
-        \
-         Shared Redis
-
-        /
-       /
-Pod 2
-    ↓
-Pool 2
-```
-
-This is expected behaviour.
+This remains one deployable backend application.
 
 ---
 
-# 4.15 Do Not Create One Global Pool Across Pods
+### Cosmos DB
 
-Pods cannot share Python memory.
-
-Therefore:
+Role:
 
 ```text
-Pod 1
-has its own Redis connection pool.
-
-Pod 2
-has its own Redis connection pool.
-
-Pod 3
-has its own Redis connection pool.
+Authoritative Data Source
 ```
 
-All pools connect to the same managed Redis service.
+Cosmos remains responsible for storing the actual business/domain data.
 
 ---
 
-# 4.16 Redis Connection Validation
+### Redis
 
-During startup, the application may optionally perform:
+Role:
 
 ```text
-PING
+Shared Application Cache
 ```
 
-to determine whether Redis is reachable.
-
-Example:
-
-```python
-try:
-    await redis_client.ping()
-
-except Exception:
-    logger.warning(
-        "Redis unavailable during startup. "
-        "Application will continue using Cosmos fallback."
-    )
-```
-
-Critical design decision:
-
-> Redis startup failure should normally not prevent the backend pod from starting.
-
-Because Redis is an optimization, not a correctness dependency.
+Redis stores temporary reusable copies of data.
 
 ---
 
-# 4.17 Do Not Make Redis a Mandatory Readiness Dependency
+### Existing Memory Server
 
-Be careful with Kubernetes readiness probes.
-
-If application readiness depends entirely on Redis health:
+Role:
 
 ```text
-Redis unavailable
-       ↓
-Backend marked unready
-       ↓
-All application traffic stops
+Existing Custom Framework Capability
 ```
 
-That conflicts with the desired fallback design.
+It is not required for Redis caching.
 
-The backend should generally remain capable of serving requests through Cosmos.
-
-Redis health should be observable separately.
+It should not be included in the cache dependency path.
 
 ---
 
-# 4.18 Cache Service Interface
+# 5.4 Local Infrastructure
 
-A simple abstraction should be introduced.
-
-Example:
-
-```python
-from typing import Protocol, Any
-
-
-class CacheService(Protocol):
-
-    async def get(
-        self,
-        key: str
-    ) -> Any | None:
-        ...
-
-    async def set(
-        self,
-        key: str,
-        value: Any,
-        ttl_seconds: int
-    ) -> None:
-        ...
-
-    async def delete(
-        self,
-        key: str
-    ) -> None:
-        ...
-```
-
-The exact abstraction style should follow the current repository conventions.
-
----
-
-# 4.19 Redis Cache Service
-
-Example concept:
-
-```python
-import json
-
-
-class RedisCacheService:
-
-    def __init__(
-        self,
-        redis_client,
-        logger
-    ):
-        self.redis = redis_client
-        self.logger = logger
-
-    async def get(
-        self,
-        key: str
-    ):
-
-        try:
-
-            value = await self.redis.get(key)
-
-            if value is None:
-
-                self.logger.debug(
-                    "cache_miss",
-                    extra={"cache_key": key}
-                )
-
-                return None
-
-            self.logger.debug(
-                "cache_hit",
-                extra={"cache_key": key}
-            )
-
-            return json.loads(value)
-
-        except Exception as exc:
-
-            self.logger.warning(
-                "cache_get_failed",
-                extra={
-                    "cache_key": key,
-                    "error": str(exc)
-                }
-            )
-
-            return None
-
-    async def set(
-        self,
-        key: str,
-        value,
-        ttl_seconds: int
-    ) -> None:
-
-        try:
-
-            serialized = json.dumps(value)
-
-            await self.redis.set(
-                key,
-                serialized,
-                ex=ttl_seconds
-            )
-
-        except Exception as exc:
-
-            self.logger.warning(
-                "cache_set_failed",
-                extra={
-                    "cache_key": key,
-                    "error": str(exc)
-                }
-            )
-```
-
-This demonstrates the expected behaviour:
+Local development will use:
 
 ```text
-Redis GET failure
-    ↓
-Return None
-    ↓
-Caller uses Cosmos
+Podman
 ```
 
----
+not Docker.
 
-# 4.20 Important Limitation of Returning `None`
-
-If `None` is a legitimate cached value, then:
-
-```text
-Cache Miss
-```
-
-and:
-
-```text
-Cached None
-```
-
-become indistinguishable.
-
-For initial domain-data caching this may not matter.
-
-If it does, introduce a structured result such as:
-
-```python
-class CacheResult:
-    hit: bool
-    value: Any
-```
-
-Example:
-
-```python
-result = await cache.get(key)
-
-if result.hit:
-    return result.value
-```
-
-Use whichever model best fits actual application data semantics.
-
----
-
-# 4.21 Cache Key Builder
-
-Create one place responsible for key construction.
-
-Example:
-
-```python
-class CacheKeyBuilder:
-
-    def __init__(
-        self,
-        prefix: str,
-        environment: str,
-        dataset_version: str
-    ):
-        self.prefix = prefix
-        self.environment = environment
-        self.dataset_version = dataset_version
-
-    def employer_plans(
-        self,
-        employer_id: str
-    ) -> str:
-
-        employer_id = employer_id.strip().lower()
-
-        return (
-            f"{self.prefix}:"
-            f"{self.environment}:"
-            f"{self.dataset_version}:"
-            f"employer-plans:"
-            f"{employer_id}"
-        )
-```
-
-Example output:
-
-```text
-benefits-agent:prod:2026_09:employer-plans:apple
-```
-
----
-
-# 4.22 Why Key Generation Must Be Centralized
-
-Without a key builder:
-
-```python
-# file A
-f"plan:{employer}:{plan}"
-
-# file B
-f"plans:{employer}:{plan}"
-
-# file C
-f"{employer}:plan:{plan}"
-```
-
-These would create three unrelated cache entries.
-
-Centralized key generation prevents this.
-
----
-
-# 4.23 Cosmos Repository
-
-Cosmos-specific queries should remain inside the repository/data-access layer.
-
-Example:
-
-```python
-class CosmosPlanRepository:
-
-    async def get_employer_plans(
-        self,
-        employer_id: str
-    ):
-
-        # Existing Cosmos query logic.
-
-        ...
-```
-
-Redis should not replace the repository.
-
----
-
-# 4.24 Domain Service Orchestration
-
-The domain service coordinates:
-
-```text
-Cache
-and
-Cosmos
-```
-
-Example:
-
-```python
-class PlanService:
-
-    def __init__(
-        self,
-        cache,
-        repository,
-        key_builder,
-        settings
-    ):
-        self.cache = cache
-        self.repository = repository
-        self.key_builder = key_builder
-        self.settings = settings
-
-    async def get_employer_plans(
-        self,
-        employer_id: str
-    ):
-
-        if not self.settings.cache_enabled:
-
-            return await self.repository.get_employer_plans(
-                employer_id
-            )
-
-        cache_key = (
-            self.key_builder.employer_plans(
-                employer_id
-            )
-        )
-
-        cached = await self.cache.get(
-            cache_key
-        )
-
-        if cached is not None:
-
-            return cached
-
-        plans = (
-            await self.repository.get_employer_plans(
-                employer_id
-            )
-        )
-
-        await self.cache.set(
-            cache_key,
-            plans,
-            ttl_seconds=(
-                self.settings.cache_ttl_seconds
-            )
-        )
-
-        return plans
-```
-
-This is the core cache-aside implementation.
-
----
-
-# 4.25 Agent Integration
-
-Before:
-
-```python
-plans = await cosmos_repository.get_employer_plans(
-    employer_id
-)
-```
-
-After:
-
-```python
-plans = await plan_service.get_employer_plans(
-    employer_id
-)
-```
-
-The agent does not need:
-
-```python
-redis.get(...)
-```
-
-or:
-
-```python
-redis.set(...)
-```
-
-This is intentional.
-
----
-
-# 4.26 Why the Domain Service Should Own Cache-Aside Behaviour
-
-The domain service understands:
-
-```text
-What data is being requested
-
-How it should be identified
-
-Whether it is safe to cache
-
-Which repository retrieves it
-
-Which TTL applies
-```
-
-The generic Redis cache layer should not understand:
-
-```text
-Employers
-
-Plans
-
-Business Rules
-```
-
-That separation keeps the design clean.
-
----
-
-# 4.27 Example End-to-End Code Path
-
-Conceptually:
-
-```python
-@app.post("/chat")
-async def chat(request: ChatRequest):
-
-    result = await agent.run(
-        request.message
-    )
-
-    return result
-```
-
-Agent/tool:
-
-```python
-async def get_plan_information(
-    employer_id: str
-):
-
-    return await plan_service.get_employer_plans(
-        employer_id
-    )
-```
-
-Service:
-
-```python
-async def get_employer_plans(
-    employer_id: str
-):
-
-    key = key_builder.employer_plans(
-        employer_id
-    )
-
-    cached = await cache.get(key)
-
-    if cached is not None:
-        return cached
-
-    data = await cosmos_repository.get_employer_plans(
-        employer_id
-    )
-
-    await cache.set(
-        key,
-        data,
-        ttl_seconds=settings.cache_ttl_seconds
-    )
-
-    return data
-```
-
----
-
-# 4.28 Redis Failure Handling
-
-Redis failure must be isolated.
-
-Example:
-
-```python
-async def get_employer_plans(
-    employer_id: str
-):
-
-    cache_key = key_builder.employer_plans(
-        employer_id
-    )
-
-    cached = await cache.get(
-        cache_key
-    )
-
-    if cached is not None:
-
-        return cached
-
-    data = await cosmos_repository.get_employer_plans(
-        employer_id
-    )
-
-    await cache.set(
-        cache_key,
-        data,
-        ttl_seconds=settings.cache_ttl_seconds
-    )
-
-    return data
-```
-
-If `cache.get()` catches Redis infrastructure failures and returns a miss-like result:
-
-```text
-Redis unavailable
-       ↓
-Cache returns miss
-       ↓
-Cosmos query
-       ↓
-Request succeeds
-```
-
-Similarly:
-
-```text
-Redis SET fails
-       ↓
-Log error
-       ↓
-Do not fail user request
-```
-
----
-
-# 4.29 Cosmos Failure Is Different
-
-Redis is optional for correctness.
-
-Cosmos is not.
-
-Therefore:
-
-```text
-Redis failure
-    ↓
-Fallback possible
-```
-
-but:
-
-```text
-Redis miss
-    +
-Cosmos failure
-    ↓
-Request may fail
-```
-
-because the authoritative data source is unavailable.
-
-This distinction must appear clearly in logging and alerting.
-
----
-
-# 4.30 Timeouts
-
-Redis operations should have short timeouts.
-
-The application should not wait a long time for an optional cache.
-
-Bad behaviour:
-
-```text
-Redis unavailable
-
-Application waits 30 seconds
-
-Then falls back to Cosmos
-```
-
-Better:
-
-```text
-Redis unavailable
-
-Short timeout
-
-        ↓
-
-Cosmos fallback
-```
-
-Example starting configuration:
-
-```env
-REDIS_CONNECT_TIMEOUT_SECONDS=2
-
-REDIS_SOCKET_TIMEOUT_SECONDS=2
-```
-
-Actual values should be validated under load testing and network conditions.
-
----
-
-# 4.31 Avoid Excessive Retry Behaviour
-
-Because Redis is optional, aggressive retry logic may make requests slower.
-
-Avoid:
-
-```text
-Redis attempt
-
-wait
-
-retry 1
-
-wait
-
-retry 2
-
-wait
-
-retry 3
-
-then Cosmos
-```
-
-for every request.
-
-A small retry strategy may be reasonable for transient failures, but the guiding principle should be:
-
-> Prefer fast fallback to Cosmos over making the user wait for the cache.
-
----
-
-# 4.32 Cache Metrics
-
-The application should expose or record at least:
-
-```text
-cache_hit_total
-
-cache_miss_total
-
-cache_error_total
-
-cache_set_total
-
-cache_get_latency_ms
-
-cache_set_latency_ms
-```
-
-Useful additional metrics:
-
-```text
-cosmos_fallback_total
-
-cache_value_size_bytes
-
-redis_timeout_total
-```
-
----
-
-# 4.33 Cache Hit Ratio
-
-The important derived metric is:
-
-```text
-Cache Hit Ratio
-```
-
-Formula:
-
-```text
-cache hits
-------------------------- × 100
-cache hits + cache misses
-```
-
-Example:
-
-```text
-900 cache hits
-
-100 cache misses
-```
-
-Hit ratio:
-
-```text
-900
-------- × 100
-1000
-
-=
-90%
-```
-
-Because the underlying dataset changes very rarely, commonly accessed entities should eventually achieve a high cache hit ratio.
-
----
-
-# 4.34 Logging Requirements
-
-Logs should distinguish at least:
-
-```text
-CACHE_HIT
-
-CACHE_MISS
-
-CACHE_GET_ERROR
-
-CACHE_SET_ERROR
-
-COSMOS_FALLBACK
-```
-
-Do not log full cached payloads by default.
-
-Example log:
-
-```json
-{
-  "event": "CACHE_HIT",
-  "cache_key": "benefits-agent:prod:2026_09:employer-plans:apple",
-  "duration_ms": 3
-}
-```
-
----
-
-# 4.35 Do Not Log Sensitive Data
-
-Logs should contain:
-
-```text
-Cache Key
-
-Duration
-
-Status
-
-Correlation ID
-
-Error Type
-```
-
-They should not automatically contain:
-
-```text
-Full plan payload
-
-User data
-
-Sensitive request input
-
-Authentication credentials
-
-Redis password
-```
-
----
-
-# 4.36 Correlation With Existing Request Tracing
-
-If the backend already uses:
-
-```text
-request IDs
-
-trace IDs
-
-session IDs
-
-MLflow traces
-
-OpenTelemetry
-
-Application Insights
-```
-
-cache logs should include the relevant existing correlation identifier.
-
-Example:
-
-```json
-{
-  "trace_id": "...",
-  "event": "CACHE_MISS",
-  "resource": "employer-plans",
-  "employer_id": "apple"
-}
-```
-
-This helps trace:
-
-```text
-User request
-
-    ↓
-
-Cache miss
-
-    ↓
-
-Cosmos call
-
-    ↓
-
-Agent computation
-
-    ↓
-
-Response
-```
-
----
-
-# 4.37 Dependency Injection
-
-Avoid constructing cache services inside agent functions.
-
-Bad:
-
-```python
-async def agent_tool(...):
-
-    redis_client = Redis(...)
-
-    cache = RedisCacheService(
-        redis_client
-    )
-```
-
-Prefer application-level construction.
-
-Conceptually:
-
-```text
-Application startup
-
-        ↓
-
-Create Redis client
-
-        ↓
-
-Create CacheService
-
-        ↓
-
-Create Repository
-
-        ↓
-
-Create Domain Service
-
-        ↓
-
-Inject/use inside Agent
-```
-
----
-
-# 4.38 Conceptual Dependency Construction
-
-Example:
-
-```python
-redis_client = create_redis_client(
-    settings
-)
-
-cache_service = RedisCacheService(
-    redis_client
-)
-
-cosmos_repository = CosmosPlanRepository(
-    cosmos_client
-)
-
-cache_key_builder = CacheKeyBuilder(
-    prefix=settings.cache_key_prefix,
-    environment=settings.environment,
-    dataset_version=settings.dataset_version
-)
-
-plan_service = PlanService(
-    cache=cache_service,
-    repository=cosmos_repository,
-    key_builder=cache_key_builder,
-    settings=settings
-)
-```
-
-The existing framework's dependency-management style should be reused where possible.
-
----
-
-# 4.39 Cache Disabled Implementation
-
-The application may use either:
-
-```text
-conditional logic inside service
-```
-
-or a:
-
-```text
-NoOpCacheService
-```
-
-A NoOp cache is cleaner for larger systems.
-
-Example:
-
-```python
-class NoOpCacheService:
-
-    async def get(
-        self,
-        key: str
-    ):
-        return None
-
-    async def set(
-        self,
-        key: str,
-        value,
-        ttl_seconds: int
-    ):
-        return None
-
-    async def delete(
-        self,
-        key: str
-    ):
-        return None
-```
-
-Then:
-
-```text
-CACHE_ENABLED=true
-    ↓
-RedisCacheService
-
-
-CACHE_ENABLED=false
-    ↓
-NoOpCacheService
-```
-
-The domain service remains unchanged.
-
----
-
-# 4.40 Optional Cache Abstraction Design
+The recommended setup is:
 
 ```mermaid
 flowchart TD
 
-    SERVICE[Plan Service]
+    DEV[Developer]
 
-    CACHE[Cache Interface]
+    subgraph LOCAL[Local Machine]
 
-    REDISCACHE[Redis Cache Service]
+        APP[FastAPI + Custom ADK Agent]
 
-    NOOP[NoOp Cache Service]
+        REDIS[(Redis Container<br/>Podman)]
 
-    REDIS[(Redis)]
+    end
 
-    SERVICE --> CACHE
+    COSMOS[(DEV / Local-access Cosmos DB)]
 
-    CACHE --> REDISCACHE
+    DEV --> APP
 
-    CACHE --> NOOP
+    APP --> REDIS
 
-    REDISCACHE --> REDIS
+    APP --> COSMOS
 ```
-
-This is particularly useful for:
-
-- unit tests,
-- debugging,
-- local development without Redis,
-- emergency cache disabling.
 
 ---
 
-# 4.41 Local Podman Implementation
+# 5.5 Local Redis Requirements
 
-Local Redis should use Podman.
-
-Example:
-
-```bash
-podman pull redis:7
-```
-
-Then:
+Developers should be able to start Redis using:
 
 ```bash
 podman run \
@@ -3031,35 +158,90 @@ podman run \
   -d redis:7
 ```
 
-Check:
+If Redis already exists:
 
 ```bash
-podman ps
+podman start agent-redis
 ```
 
-Open Redis CLI:
+To stop:
 
 ```bash
-podman exec -it agent-redis redis-cli
+podman stop agent-redis
 ```
 
-Test:
+To remove:
 
-```text
-PING
-```
-
-Expected:
-
-```text
-PONG
+```bash
+podman rm agent-redis
 ```
 
 ---
 
-# 4.42 Local Podman Network If Backend Is Also Containerized
+# 5.6 Local Development Modes
 
-Create network:
+There are two possible local modes.
+
+---
+
+## 5.6.1 Application Runs Directly on Developer Machine
+
+Architecture:
+
+```text
+FastAPI + Agent
+running directly on host
+
+        ↓
+
+localhost:6379
+
+        ↓
+
+Redis Podman Container
+```
+
+Configuration:
+
+```env
+REDIS_HOST=localhost
+
+REDIS_PORT=6379
+
+REDIS_SSL=false
+```
+
+---
+
+## 5.6.2 Application Also Runs in Podman
+
+Architecture:
+
+```text
+Podman Network
+
+├── Backend Container
+│
+└── Redis Container
+```
+
+Then:
+
+```env
+REDIS_HOST=redis
+```
+
+rather than:
+
+```env
+REDIS_HOST=localhost
+```
+
+---
+
+# 5.7 Local Podman Network
+
+Example:
 
 ```bash
 podman network create agent-network
@@ -3085,556 +267,1539 @@ podman run \
   <backend-image>
 ```
 
-Then:
+The two containers can communicate through the Podman network.
 
-```text
-backend
-    ↓
-redis:6379
+---
+
+# 5.8 DEV Infrastructure
+
+DEV runs in AKS.
+
+Recommended architecture:
+
+```mermaid
+flowchart TD
+
+    subgraph AKS[DEV AKS]
+
+        P1[Backend Pod<br/>FastAPI + Agent]
+
+        P2[Optional Additional Replica]
+
+    end
+
+    REDIS[(DEV Redis)]
+
+    COSMOS[(DEV Cosmos DB)]
+
+    P1 --> REDIS
+    P2 --> REDIS
+
+    P1 --> COSMOS
+    P2 --> COSMOS
 ```
 
 ---
 
-# 4.43 Do Not Build Local Code Around `localhost`
+# 5.9 DEV Redis Hosting Decision
 
-The code should never assume:
+DEV has two acceptable options.
 
-```python
-host = "localhost"
-```
-
-Instead:
-
-```python
-host = settings.redis_host
-```
-
-This allows:
+### Preferred
 
 ```text
-Local Host Process
-    ↓
-localhost
-
-Local Podman Containers
-    ↓
-redis
-
-Azure
-    ↓
-managed Redis hostname
+Azure Managed Redis
 ```
 
-without code changes.
+because it closely resembles STAGE and PROD.
 
 ---
 
-# 4.44 Development Deployment Requirements
-
-DEV infrastructure should provide:
+### Alternative
 
 ```text
-Redis Host
-
-Redis Port
-
-TLS Setting
-
-Authentication Method
-
-Network Connectivity
-
-DNS Resolution
+Redis Deployment inside DEV AKS
 ```
 
-The backend deployment should receive these through the approved Kubernetes/Azure configuration mechanism.
+This is acceptable only if:
+
+- DEV is disposable,
+- cost is a concern,
+- high availability is unnecessary,
+- infrastructure drift is acceptable.
 
 ---
 
-# 4.45 Stage Deployment Requirements
+# 5.10 Recommended DEV Decision
 
-Stage should additionally validate:
+The preferred hierarchy is:
 
 ```text
-Multiple backend replicas
+Managed Redis available?
+        │
+        ├── Yes → Use it
+        │
+        └── No  → Use Redis in DEV AKS temporarily
+```
 
-Private connectivity
+If Redis is deployed inside DEV AKS, this should be clearly documented as:
 
-Redis authentication
+```text
+Development-only infrastructure
+```
 
-TLS
+and not copied into PROD.
 
-Connection pooling
+---
 
-Cache consistency
+# 5.11 STAGE Infrastructure
 
-Dataset version update
+STAGE should closely resemble PROD.
 
-Redis outage fallback
+Recommended:
 
-Cache warm-up behaviour
+```mermaid
+flowchart TD
+
+    subgraph AKS[STAGE AKS]
+
+        P1[Backend Pod 1<br/>FastAPI + Agent]
+
+        P2[Backend Pod 2<br/>FastAPI + Agent]
+
+    end
+
+    REDIS[(STAGE Managed Redis)]
+
+    COSMOS[(STAGE Cosmos DB)]
+
+    P1 --> REDIS
+    P2 --> REDIS
+
+    P1 --> COSMOS
+    P2 --> COSMOS
+```
+
+STAGE should use:
+
+- managed Redis,
+- private networking where applicable,
+- TLS,
+- production-like authentication,
+- multiple backend replicas.
+
+---
+
+# 5.12 Production Infrastructure
+
+PROD architecture:
+
+```mermaid
+flowchart TD
+
+    USER[Users]
+
+    ENTRY[Ingress / API Gateway / Service]
+
+    subgraph AKS[Production AKS]
+
+        P1[Backend Pod 1<br/>FastAPI + Agent]
+
+        P2[Backend Pod 2<br/>FastAPI + Agent]
+
+        P3[Backend Pod N<br/>FastAPI + Agent]
+
+    end
+
+    REDIS[(Production Managed Redis)]
+
+    COSMOS[(Production Cosmos DB)]
+
+    USER --> ENTRY
+
+    ENTRY --> P1
+    ENTRY --> P2
+    ENTRY --> P3
+
+    P1 --> REDIS
+    P2 --> REDIS
+    P3 --> REDIS
+
+    P1 --> COSMOS
+    P2 --> COSMOS
+    P3 --> COSMOS
 ```
 
 ---
 
-# 4.46 Production Deployment Requirements
+# 5.13 Production Redis Must Be External to Backend Pods
 
-Production infrastructure must provide:
-
-```text
-Managed Redis Instance
-
-Private Network Connectivity
-
-Approved Authentication
-
-Monitoring
-
-Capacity Configuration
-
-High Availability Configuration
-
-Alerting
-```
-
-The backend deployment must receive only the information necessary to connect.
-
----
-
-# 4.47 Secrets
-
-Do not place credentials directly inside:
+Do not design:
 
 ```text
-source code
-
-Git repository
-
-Dockerfile
-
-plain Kubernetes deployment YAML
-```
-
-Examples of prohibited patterns:
-
-```python
-REDIS_PASSWORD = "actual-password"
-```
-
-or:
-
-```yaml
-env:
-  - name: REDIS_PASSWORD
-    value: "actual-password"
-```
-
-Use the organization's approved secret-management pattern.
-
-Examples may include:
-
-```text
-Azure Managed Identity
-
-Azure Key Vault
-
-Kubernetes secret integration
-
-Workload Identity
-```
-
-depending on current organizational standards.
-
----
-
-# 4.48 Container Image Changes
-
-The backend image only requires application dependency changes.
-
-The application container remains:
-
-```text
-FastAPI
-+
-Custom ADK Agent
-+
-Redis Python Client
-+
-Existing Dependencies
-```
-
-Redis does **not** run inside the same backend container.
-
-Do not create:
-
-```text
-One Container
+Backend Pod
 
 ├── FastAPI
 ├── Agent
-└── Redis Server
+└── Redis
 ```
 
-That is not the intended architecture.
+Redis should not run in the same container as the backend.
+
+The correct model is:
+
+```text
+Backend Pod
+    ↓
+External Redis Service
+```
 
 ---
 
-# 4.49 Kubernetes Backend Deployment
+# 5.14 Production Redis Hosting Recommendation
 
-The backend AKS deployment remains conceptually:
+Production should use:
 
 ```text
-Deployment
-    ↓
-Replica 1
-    FastAPI + Agent
-
-Replica 2
-    FastAPI + Agent
-
-Replica N
-    FastAPI + Agent
+Azure Managed Redis
 ```
 
-Each pod connects externally to:
+rather than a manually managed Redis pod.
+
+This reduces application-team responsibility for:
+
+- failover,
+- Redis patching,
+- upgrades,
+- node recovery,
+- persistence configuration,
+- replication,
+- service availability,
+- operational maintenance.
+
+---
+
+# 5.15 Network Connectivity
+
+The intended network path is:
 
 ```text
+AKS Backend Pod
+
+        ↓
+
+Private Network Path
+
+        ↓
+
 Redis
-and
+```
+
+and:
+
+```text
+AKS Backend Pod
+
+        ↓
+
+Private / Approved Network Path
+
+        ↓
+
 Cosmos
 ```
 
----
-
-# 4.50 Health Check Strategy
-
-Application health checks should distinguish:
-
-```text
-Application Health
-
-Cosmos Health
-
-Redis Health
-```
-
-Redis being unhealthy should be reported but should not necessarily make:
-
-```text
-/health
-```
-
-fail completely.
-
-Possible health response:
-
-```json
-{
-  "status": "degraded",
-  "components": {
-    "application": "healthy",
-    "cosmos": "healthy",
-    "redis": "unavailable"
-  }
-}
-```
-
-The exact health API depends on current platform requirements.
+Where organization architecture supports it, Redis should not require unrestricted public access.
 
 ---
 
-# 4.51 Why `degraded` Is Useful
+# 5.16 DNS Requirement
 
-It communicates:
+The backend will connect to Redis using a hostname.
 
-```text
-Application is functional
+Example:
 
-but
-
-cache is unavailable
+```env
+REDIS_HOST=<redis-hostname>
 ```
 
-This matches the architectural intent.
-
----
-
-# 4.52 Unit Testing
-
-Unit tests should cover at least the following.
-
-### Test 1 — Cache Hit
+Therefore DEV/STAGE/PROD must ensure:
 
 ```text
-Redis returns data
-
-Expected:
-
-Cosmos repository is NOT called
-```
-
----
-
-### Test 2 — Cache Miss
-
-```text
-Redis returns no value
-
-Expected:
-
-Cosmos is called
-
-Redis SET is called
-
-Cosmos value is returned
-```
-
----
-
-### Test 3 — Redis GET Failure
-
-```text
-Redis raises timeout
-
-Expected:
-
-Cosmos is called
-
-Request succeeds if Cosmos succeeds
-```
-
----
-
-### Test 4 — Redis SET Failure
-
-```text
-Cosmos succeeds
-
-Redis SET fails
-
-Expected:
-
-Cosmos value is still returned
-```
-
----
-
-### Test 5 — Cache Disabled
-
-```text
-CACHE_ENABLED=false
-
-Expected:
-
-Redis is bypassed
-
-Cosmos is called
-```
-
----
-
-### Test 6 — Correct Cache Key
-
-Given:
-
-```text
-environment=prod
-
-dataset_version=2026_09
-
-employer=apple
-```
-
-Expected:
-
-```text
-benefits-agent:prod:2026_09:employer-plans:apple
-```
-
----
-
-# 4.53 Example Unit Test Concept
-
-```python
-async def test_cache_hit_does_not_call_cosmos():
-
-    cache.get.return_value = cached_plans
-
-    result = await service.get_employer_plans(
-        "apple"
-    )
-
-    assert result == cached_plans
-
-    repository.get_employer_plans.assert_not_called()
-```
-
----
-
-# 4.54 Integration Testing
-
-Integration tests should verify:
-
-```text
-Application
-
+AKS Pod
     ↓
-
-Actual Redis test instance
-
+DNS resolution
     ↓
-
-Cache write
-
-    ↓
-
-Cache read
+Redis hostname resolves correctly
 ```
 
-Local integration tests can use Podman Redis.
+Private endpoint configurations must also include correct DNS integration.
 
 ---
 
-# 4.55 Stage Failure Testing
+# 5.17 TLS
 
-Stage should test:
+Shared environments should use encrypted Redis communication.
+
+Recommended:
+
+```env
+REDIS_SSL=true
+```
+
+Local development may use:
+
+```env
+REDIS_SSL=false
+```
+
+if Redis is only available on the developer machine.
+
+---
+
+# 5.18 Environment Variables Required by Backend
+
+Recommended Redis-related settings:
+
+```env
+CACHE_ENABLED=true
+
+CACHE_KEY_PREFIX=benefits-agent
+
+DATASET_VERSION=2026_09
+
+CACHE_TTL_SECONDS=604800
+
+REDIS_HOST=<hostname>
+
+REDIS_PORT=<port>
+
+REDIS_SSL=true
+
+REDIS_DB=0
+
+REDIS_CONNECT_TIMEOUT_SECONDS=2
+
+REDIS_SOCKET_TIMEOUT_SECONDS=2
+
+REDIS_MAX_CONNECTIONS=50
+```
+
+Authentication settings depend on infrastructure.
+
+Possible:
+
+```env
+REDIS_USERNAME=
+
+REDIS_PASSWORD=
+```
+
+if password-based authentication is required.
+
+---
+
+# 5.19 Environment-Specific Configuration
+
+Example:
+
+### Local
+
+```env
+ENVIRONMENT=local
+
+REDIS_HOST=localhost
+
+REDIS_PORT=6379
+
+REDIS_SSL=false
+```
+
+### DEV
+
+```env
+ENVIRONMENT=dev
+
+REDIS_HOST=<dev-redis>
+
+REDIS_SSL=true
+```
+
+### STAGE
+
+```env
+ENVIRONMENT=stage
+
+REDIS_HOST=<stage-redis>
+
+REDIS_SSL=true
+```
+
+### PROD
+
+```env
+ENVIRONMENT=prod
+
+REDIS_HOST=<prod-redis>
+
+REDIS_SSL=true
+```
+
+---
+
+# 5.20 Kubernetes Deployment Configuration
+
+The backend deployment should receive configuration from approved Kubernetes mechanisms.
+
+Conceptually:
+
+```yaml
+env:
+  - name: CACHE_ENABLED
+    value: "true"
+
+  - name: REDIS_HOST
+    valueFrom:
+      configMapKeyRef:
+        name: backend-config
+        key: redis-host
+
+  - name: CACHE_TTL_SECONDS
+    value: "604800"
+```
+
+Secrets should not be directly embedded as plaintext.
+
+---
+
+# 5.21 ConfigMap vs Secret
+
+Non-sensitive values may be stored using:
 
 ```text
-1. Start application normally.
-
-2. Populate Redis.
-
-3. Verify cache hits.
-
-4. Temporarily make Redis unavailable.
-
-5. Send requests.
-
-6. Verify application continues using Cosmos.
-
-7. Restore Redis.
-
-8. Verify cache starts populating again.
+ConfigMap
 ```
 
-This validates the most important resilience requirement.
+Examples:
+
+```text
+CACHE_ENABLED
+
+REDIS_PORT
+
+CACHE_TTL_SECONDS
+
+DATASET_VERSION
+
+CACHE_KEY_PREFIX
+```
+
+Sensitive values must use approved secret management.
+
+Examples:
+
+```text
+Redis Password
+
+Authentication Token
+```
 
 ---
 
-# 4.56 Multi-Pod Testing
+# 5.22 Infrastructure Ownership
 
-Stage should also test shared cache behaviour.
+Responsibility should be clear.
+
+Suggested ownership:
+
+### Application Team
+
+Owns:
+
+- Redis client code,
+- cache-aside implementation,
+- key design,
+- TTL design,
+- fallback logic,
+- cache metrics,
+- cache tests.
+
+---
+
+### DevOps / Platform Team
+
+Owns:
+
+- Redis infrastructure provisioning,
+- network access,
+- private endpoint,
+- DNS,
+- secrets integration,
+- AKS deployment configuration,
+- monitoring infrastructure,
+- Redis capacity configuration.
+
+---
+
+### Data / Application Owners
+
+Own:
+
+- Cosmos dataset refresh,
+- dataset version update,
+- validating data freshness.
+
+---
+
+# 5.23 Environment Summary
+
+| Infrastructure | Local | DEV | STAGE | PROD |
+|---|---|---|---|---|
+| Backend | Local/Podman | AKS | AKS | AKS |
+| Container tool | Podman | Docker pipeline | Docker pipeline | Docker pipeline |
+| Redis | Podman container | Managed preferred | Managed | Managed |
+| Cosmos | DEV-access | DEV | STAGE | PROD |
+| TLS | No/Optional | Yes | Yes | Yes |
+| Private networking | No | Preferred | Yes | Yes |
+| HA | No | Optional | Recommended | Required |
+| Shared Redis | Optional | Yes | Yes | Yes |
+| Secrets management | Local env | Approved mechanism | Approved mechanism | Approved mechanism |
+
+---
+
+# 6. Security, Reliability, and Failure Scenarios
+
+## 6.1 Purpose of This Section
+
+This section defines how the application should behave when:
+
+- Redis fails,
+- Cosmos fails,
+- networking fails,
+- stale cache exists,
+- authentication fails,
+- pods restart,
+- AKS scales,
+- cache entries disappear,
+- multiple tenants use the system.
+
+The goal is to prevent Redis from accidentally becoming a new single point of failure.
+
+---
+
+# 6.2 Reliability Principle
+
+The core rule is:
+
+```text
+Redis is optional for performance.
+
+Cosmos is required for data correctness.
+```
+
+Therefore:
+
+```text
+Redis failure
+    ↓
+Application should continue
+```
+
+but:
+
+```text
+Cosmos failure
+    ↓
+Application may no longer be able to obtain authoritative data
+```
+
+---
+
+# 6.3 Redis Failure Scenario
 
 Example:
 
 ```text
-Request routed to Pod 1
-
-        ↓
-
-Cache miss
-
-        ↓
-
-Cosmos
-
-        ↓
-
-Redis populated
+Redis unavailable
 ```
 
-Then:
+Possible causes:
+
+- Redis maintenance,
+- network issue,
+- authentication issue,
+- DNS issue,
+- service outage.
+
+Expected behaviour:
+
+```mermaid
+flowchart TD
+
+    REQ[Application Needs Data]
+
+    REDIS[Try Redis]
+
+    FAIL{Redis Available?}
+
+    COSMOS[(Cosmos DB)]
+
+    RESULT[Return Data]
+
+    REQ --> REDIS
+
+    REDIS --> FAIL
+
+    FAIL -->|Yes| RESULT
+
+    FAIL -->|No| COSMOS
+
+    COSMOS --> RESULT
+```
+
+In simple terms:
 
 ```text
-Request routed to Pod 2
+Redis fails
 
-        ↓
+    ↓
 
-Redis hit
+Log warning
 
-        ↓
+    ↓
 
-No Cosmos read
+Use Cosmos
+
+    ↓
+
+Continue request
 ```
-
-This confirms Redis is actually providing shared caching.
 
 ---
 
-# 4.57 Dataset Version Test
+# 6.4 Redis GET Timeout
 
-Stage should test:
+If Redis GET times out:
 
-Initial configuration:
-
-```env
-DATASET_VERSION=2026_09
+```text
+Do not wait indefinitely.
 ```
 
-Cache populated.
+Expected:
 
-Then change:
+```text
+Redis timeout
+
+    ↓
+
+Increment cache error metric
+
+    ↓
+
+Log event
+
+    ↓
+
+Call Cosmos
+```
+
+---
+
+# 6.5 Redis SET Failure
+
+Suppose Cosmos query succeeds:
+
+```text
+Cosmos
+    ↓
+returns correct data
+```
+
+but Redis SET fails.
+
+Expected:
+
+```text
+Return Cosmos result to user.
+```
+
+Do not fail the request merely because:
+
+```text
+Cache population failed.
+```
+
+---
+
+# 6.6 Cosmos Failure Scenario
+
+Suppose Redis has no cached value and Cosmos is unavailable.
+
+```text
+Redis miss
+
+    ↓
+
+Cosmos unavailable
+```
+
+Now the application cannot retrieve authoritative data.
+
+This is a real application-data failure.
+
+Expected behaviour depends on existing API error handling.
+
+For example:
+
+```text
+Service unavailable
+
+or
+
+Domain-specific error
+```
+
+This should be treated much more seriously than Redis failure.
+
+---
+
+# 6.7 Cached Data During Cosmos Failure
+
+Suppose:
+
+```text
+Redis contains valid cached value
+```
+
+and:
+
+```text
+Cosmos is temporarily unavailable.
+```
+
+The application may still successfully serve the Redis value if the cache entry is valid.
+
+This is a reliability benefit.
+
+However:
+
+> Redis must not be intentionally used as a permanent backup database.
+
+---
+
+# 6.8 Both Redis and Cosmos Fail
+
+Scenario:
+
+```text
+Redis unavailable
+
+and
+
+Cosmos unavailable
+```
+
+Expected:
+
+```text
+Application cannot obtain required domain data.
+```
+
+The application should:
+
+- fail predictably,
+- return an appropriate error,
+- log the dependency failure,
+- trigger monitoring/alerting.
+
+---
+
+# 6.9 Failure Priority
+
+A useful severity distinction is:
+
+```text
+Redis Down
+    =
+Degraded Performance
+
+
+Cosmos Down
+    =
+Potential Functional Outage
+```
+
+This distinction should exist in:
+
+- logs,
+- alerts,
+- dashboards,
+- health endpoints.
+
+---
+
+# 6.10 Backend Pod Restart
+
+A backend pod restart should not affect Redis cache contents.
+
+Architecture:
+
+```text
+Redis
+    =
+External Shared Service
+```
+
+Therefore:
+
+```text
+Pod 1 restarts
+```
+
+Redis still contains the same cached data.
+
+After restart:
+
+```text
+Pod 1 reconnects to Redis
+```
+
+and continues operating.
+
+---
+
+# 6.11 AKS Scale-Up
+
+Suppose the backend scales from:
+
+```text
+2 pods
+```
+
+to:
+
+```text
+6 pods
+```
+
+New pods should immediately connect to the same Redis.
+
+They do not need independent cache warm-up.
+
+Example:
+
+```text
+Pod 1 previously cached Employer A.
+
+Pod 6 starts.
+
+Pod 6 requests Employer A.
+
+Pod 6 gets Redis cache hit.
+```
+
+This is one of the main advantages of shared Redis.
+
+---
+
+# 6.12 AKS Scale-Down
+
+Suppose Pod 3 is removed.
+
+No important cache data should be lost because Redis is external.
+
+Therefore:
+
+```text
+Pod removed
+    ≠
+Cache removed
+```
+
+---
+
+# 6.13 Redis Restart
+
+Redis should be treated as disposable.
+
+If Redis restarts and cached data disappears:
+
+```text
+Next request
+    ↓
+Cache miss
+    ↓
+Cosmos query
+    ↓
+Cache rebuild
+```
+
+The application should recover automatically.
+
+---
+
+# 6.14 Stale Cache Scenario
+
+The main stale-data risk occurs when:
+
+```text
+Cosmos changes
+```
+
+but:
+
+```text
+Redis still contains older data.
+```
+
+The primary protection mechanisms are:
+
+```text
+Dataset Versioning
+
++
+
+TTL
+```
+
+---
+
+# 6.15 Dataset Refresh Reliability
+
+When the six-month dataset changes:
+
+```text
+Old version:
+
+2026_09
+
+New version:
+
+2027_03
+```
+
+the application should switch:
 
 ```env
 DATASET_VERSION=2027_03
 ```
 
-Expected:
+This immediately isolates new reads from old cached entries.
+
+---
+
+# 6.16 Avoid Updating Cosmos Without Updating Dataset Version
+
+A risky process is:
 
 ```text
-Old keys remain temporarily
+Change Cosmos data
 
 but
 
-application no longer reads them.
+leave DATASET_VERSION unchanged
+```
 
-New requests produce misses.
+Then Redis may continue returning old values.
 
-New cache namespace is populated.
+Therefore dataset refresh procedure must include:
+
+```text
+Cosmos Data Update
+
+        +
+
+Dataset Version Update
+```
+
+These two should be treated as one release activity.
+
+---
+
+# 6.17 Emergency Data Correction
+
+If only one record or employer must be corrected immediately:
+
+```text
+Correct Cosmos
+```
+
+then explicitly invalidate the related Redis key.
+
+Example:
+
+```text
+benefits-agent:prod:2026_09:employer-plans:apple
+```
+
+The next request repopulates it.
+
+---
+
+# 6.18 Security Principle
+
+Redis may contain copies of application data.
+
+Therefore it must be protected similarly to other backend infrastructure.
+
+Key protections include:
+
+- network restriction,
+- encryption in transit,
+- authentication,
+- secret protection,
+- tenant isolation,
+- logging discipline.
+
+---
+
+# 6.19 Network Security
+
+Preferred shared-environment model:
+
+```text
+AKS
+
+    ↓
+
+Private Network
+
+    ↓
+
+Redis
+```
+
+Avoid exposing Redis broadly to the internet.
+
+---
+
+# 6.20 TLS
+
+DEV/STAGE/PROD should use encrypted Redis connections where supported.
+
+Conceptually:
+
+```text
+Backend Pod
+
+    ↓
+
+TLS
+
+    ↓
+
+Redis
+```
+
+This protects cached data while in transit.
+
+---
+
+# 6.21 Authentication
+
+Redis access should require an approved authentication mechanism.
+
+Credentials must not be hard-coded into:
+
+```text
+Python source code
+
+Git repository
+
+Dockerfile
+
+plain deployment manifests
+```
+
+Use approved platform mechanisms.
+
+---
+
+# 6.22 Secret Rotation
+
+The application should not require a code release merely because Redis credentials rotate.
+
+Credentials should be injected externally.
+
+Example:
+
+```text
+Key Vault / Secret Store
+
+        ↓
+
+AKS
+
+        ↓
+
+Backend Pod
 ```
 
 ---
 
-# 4.58 Performance Testing
+# 6.23 Tenant Isolation
 
-Compare the following.
+If multiple employers use the same backend and Redis, keys must prevent tenant crossover.
 
-### Baseline
+Bad:
 
 ```text
-Redis disabled
+plans:gold-ppo
 ```
 
-Measure:
-
-- response latency,
-- Cosmos calls,
-- Cosmos RU consumption,
-- throughput.
-
-### Cache Enabled
+Better:
 
 ```text
-Redis enabled
+benefits-agent:prod:2026_09:plan:apple:gold-ppo
 ```
 
-Measure the same metrics.
+This ensures the employer identifier is part of cache identity.
 
-Expected result:
+---
+
+# 6.24 Authorization Must Happen Independently of Cache
+
+A critical rule:
+
+> A cache hit must never bypass authorization logic.
+
+Example:
 
 ```text
-Higher cache hit rate
+User requests Employer B
 
-Lower repeated Cosmos traffic
+Redis has Employer B data
+```
 
-Reduced data-access latency
+The application must still validate that the request is allowed before returning the data.
+
+Redis should never become:
+
+```text
+"Data exists, therefore user can access it."
 ```
 
 ---
 
-# 4.59 Cold Cache vs Warm Cache
+# 6.25 Cache Key Security
 
-Testing must distinguish:
+Avoid placing secrets directly into cache keys.
+
+Bad:
+
+```text
+session:<access-token>
+```
+
+Cache keys may appear in:
+
+- logs,
+- Redis inspection,
+- monitoring.
+
+Only safe identifiers should be included.
+
+---
+
+# 6.26 Cache Payload Security
+
+Do not cache values merely because they are convenient.
+
+Ask:
+
+```text
+Does this payload contain sensitive user-specific data?
+```
+
+If yes, evaluate separately before caching.
+
+The initial design should primarily cache:
+
+```text
+Shared Cosmos-derived domain data
+```
+
+rather than user-specific data.
+
+---
+
+# 6.27 Logging Security
+
+Do not log:
+
+```text
+Full Redis payload
+
+Authentication token
+
+Redis password
+
+Full user context
+
+Sensitive personal information
+```
+
+Prefer:
+
+```text
+cache_key
+
+cache_event
+
+duration
+
+trace_id
+
+error_type
+```
+
+---
+
+# 6.28 Cache Poisoning Considerations
+
+Only trusted backend code should be allowed to populate cache values.
+
+Do not let arbitrary frontend input directly become a Redis value without validation.
+
+The normal path should be:
+
+```text
+User Input
+
+    ↓
+
+Application Validation
+
+    ↓
+
+Cosmos Query
+
+    ↓
+
+Validated Domain Data
+
+    ↓
+
+Redis
+```
+
+---
+
+# 6.29 Graceful Degradation
+
+Redis should have a circuit-like behaviour conceptually.
+
+Repeated failures should not result in every request spending excessive time waiting.
+
+Desired behaviour:
+
+```text
+Redis unhealthy
+    ↓
+Fast failure
+    ↓
+Cosmos fallback
+```
+
+Advanced circuit-breaker implementation can be added later if needed.
+
+---
+
+# 6.30 Timeout Requirements
+
+Cache timeouts should remain short.
+
+The application must prefer:
+
+```text
+Fast fallback
+```
+
+instead of:
+
+```text
+Long Redis wait
+```
+
+Recommended starting point:
+
+```env
+REDIS_CONNECT_TIMEOUT_SECONDS=2
+
+REDIS_SOCKET_TIMEOUT_SECONDS=2
+```
+
+These values should be validated during performance testing.
+
+---
+
+# 6.31 Retry Requirements
+
+Avoid aggressive retry loops.
+
+Bad:
+
+```text
+Redis fails
+
+Retry 5 times
+
+Wait repeatedly
+
+Then call Cosmos
+```
+
+Better:
+
+```text
+Redis fails quickly
+
+Call Cosmos
+```
+
+Because Redis is not required for correctness.
+
+---
+
+# 6.32 Health Status
+
+The backend should ideally distinguish:
+
+```text
+healthy
+
+degraded
+
+unhealthy
+```
+
+Example:
+
+```text
+Application healthy
+Cosmos healthy
+Redis unavailable
+```
+
+Result:
+
+```text
+degraded
+```
+
+rather than:
+
+```text
+unhealthy
+```
+
+provided the application can still serve required traffic.
+
+---
+
+# 6.33 Example Health Response
+
+Conceptual example:
+
+```json
+{
+  "status": "degraded",
+  "dependencies": {
+    "redis": "unavailable",
+    "cosmos": "healthy"
+  }
+}
+```
+
+If Cosmos is unavailable:
+
+```json
+{
+  "status": "unhealthy",
+  "dependencies": {
+    "redis": "healthy",
+    "cosmos": "unavailable"
+  }
+}
+```
+
+---
+
+# 6.34 Reliability Scenario Table
+
+| Scenario | Expected Behaviour |
+|---|---|
+| Redis hit | Use Redis |
+| Redis miss | Query Cosmos, populate Redis |
+| Redis timeout | Log + Cosmos fallback |
+| Redis unavailable | Cosmos fallback |
+| Redis SET fails | Return Cosmos result |
+| Redis restart | Cache rebuilds automatically |
+| Backend pod restart | Reconnect to existing Redis |
+| Backend scales up | New pod shares existing cache |
+| Dataset changes | Increment dataset version |
+| One record corrected | Delete affected key |
+| Cosmos fails + Redis hit | Cached data may still serve |
+| Cosmos fails + Redis miss | Request likely fails |
+| Redis + Cosmos fail | Functional outage |
+
+---
+
+# 6.35 Reliability Design Summary
+
+The key principle is:
+
+```text
+Redis should improve:
+
+Performance
+
+Scalability
+
+Resilience
+
+but should not reduce:
+
+Correctness
+
+Availability
+
+Security
+```
+
+---
+
+# 7. Observability and Performance Validation
+
+## 7.1 Purpose of This Section
+
+Adding Redis is not successful merely because:
+
+```text
+Redis GET works.
+```
+
+The team must be able to prove that Redis:
+
+- reduces Cosmos usage,
+- reduces latency,
+- behaves correctly,
+- fails safely,
+- and provides measurable value.
+
+This requires observability.
+
+---
+
+# 7.2 Observability Goals
+
+The application should answer these questions:
+
+```text
+How many requests hit Redis?
+
+How many requests miss Redis?
+
+How often is Redis failing?
+
+How much latency does Redis add?
+
+How many requests fall back to Cosmos?
+
+Has Cosmos traffic decreased?
+
+What is the cache hit ratio?
+
+Are any cache keys unusually large?
+
+Is Redis becoming a bottleneck?
+```
+
+---
+
+# 7.3 Minimum Metrics
+
+The first implementation should record:
+
+```text
+cache_hit_total
+
+cache_miss_total
+
+cache_get_error_total
+
+cache_set_error_total
+
+cache_set_total
+
+cosmos_fallback_total
+```
+
+Latency metrics:
+
+```text
+cache_get_latency_ms
+
+cache_set_latency_ms
+
+cosmos_query_latency_ms
+```
+
+---
+
+# 7.4 Cache Hit Ratio
+
+The primary caching metric is:
+
+```text
+Cache Hit Ratio
+```
+
+Formula:
+
+```text
+Hits
+---------------------
+Hits + Misses
+```
+
+Example:
+
+```text
+Hits = 950
+
+Misses = 50
+```
+
+Then:
+
+```text
+950 / 1000
+
+=
+
+95%
+```
+
+---
+
+# 7.5 Why Hit Ratio Matters
+
+A low hit ratio may mean:
+
+- cache keys are too specific,
+- TTL is too short,
+- access patterns are not reusable,
+- cache is being invalidated too often,
+- wrong data is being cached.
+
+Given that source data changes roughly once every six months, frequently reused data should generally achieve a strong hit rate after warm-up.
+
+---
+
+# 7.6 Cold Cache vs Warm Cache
+
+Performance must be evaluated separately for:
 
 ```text
 Cold Cache
@@ -3646,532 +1811,831 @@ and:
 Warm Cache
 ```
 
-Cold cache:
+---
+
+## 7.6.1 Cold Cache
+
+Redis is empty.
+
+Flow:
 
 ```text
-Redis empty
+Request
+    ↓
+Redis miss
+    ↓
+Cosmos
+    ↓
+Redis populate
 ```
 
-Warm cache:
-
-```text
-Frequently used values already present
-```
-
-These will have different performance characteristics.
+Latency will be similar to or slightly higher than the original Cosmos path because the application also performs cache operations.
 
 ---
 
-# 4.60 Rollout Strategy
+## 7.6.2 Warm Cache
 
-Do not switch everything to Redis in one uncontrolled change.
+Redis already contains requested data.
 
-Recommended rollout:
+Flow:
 
 ```text
-Phase 1
+Request
+    ↓
+Redis hit
+    ↓
+No Cosmos query
+```
 
-Add Redis infrastructure.
+This is where latency and Cosmos usage should improve.
 
+---
 
-Phase 2
+# 7.7 Baseline Measurement
 
-Add Redis client and cache abstraction.
+Before enabling Redis in production, measure current behaviour.
 
+Record:
 
-Phase 3
+```text
+Average response latency
 
-CACHE_ENABLED=false.
+P50 latency
 
-Deploy code.
+P95 latency
 
+P99 latency
 
-Phase 4
+Cosmos query count
 
-Verify application behaves unchanged.
+Cosmos RU consumption
 
+Requests per second
 
-Phase 5
+Error rate
+```
 
-Enable cache in DEV.
+This becomes the baseline.
 
+---
 
-Phase 6
+# 7.8 Post-Redis Measurement
 
-Validate hit/miss/fallback behaviour.
+Measure the same after Redis is enabled.
 
+Then compare:
 
-Phase 7
-
-Enable in Stage.
-
-
-Phase 8
-
-Load test.
-
-
-Phase 9
-
-Enable in Production.
-
-
-Phase 10
-
-Monitor hit ratio and Cosmos reduction.
+```text
+Before Redis
+vs
+After Redis
 ```
 
 ---
 
-# 4.61 Feature Flag / Emergency Disable
+# 7.9 Expected Improvements
 
-Because:
+The expected result is:
+
+```text
+Repeated Cosmos reads
+        ↓
+
+Lower
+```
+
+```text
+Cosmos RU consumption
+        ↓
+
+Lower
+```
+
+```text
+Frequently accessed data latency
+        ↓
+
+Lower
+```
+
+```text
+Cache hit ratio
+        ↑
+
+Higher
+```
+
+---
+
+# 7.10 Do Not Assume Performance Improvement
+
+Redis adds an additional dependency.
+
+Therefore performance improvement must be proven.
+
+If the cache hit rate is extremely low:
+
+```text
+Redis GET
+    ↓
+Miss
+    ↓
+Cosmos
+```
+
+can actually add unnecessary latency.
+
+This is why measurements matter.
+
+---
+
+# 7.11 Logging Events
+
+Recommended cache-related events:
+
+```text
+CACHE_HIT
+
+CACHE_MISS
+
+CACHE_GET_ERROR
+
+CACHE_SET_ERROR
+
+CACHE_INVALIDATE
+
+CACHE_DISABLED
+
+COSMOS_FALLBACK
+```
+
+---
+
+# 7.12 Example Cache Hit Log
+
+```json
+{
+  "event": "CACHE_HIT",
+  "resource": "employer-plans",
+  "cache_key": "benefits-agent:prod:2026_09:employer-plans:apple",
+  "duration_ms": 2,
+  "trace_id": "..."
+}
+```
+
+---
+
+# 7.13 Example Cache Miss Log
+
+```json
+{
+  "event": "CACHE_MISS",
+  "resource": "employer-plans",
+  "cache_key": "benefits-agent:prod:2026_09:employer-plans:apple",
+  "trace_id": "..."
+}
+```
+
+---
+
+# 7.14 Example Redis Failure Log
+
+```json
+{
+  "event": "CACHE_GET_ERROR",
+  "error_type": "TimeoutError",
+  "trace_id": "..."
+}
+```
+
+Avoid logging:
+
+```text
+Redis password
+
+full cached payload
+
+user-sensitive context
+```
+
+---
+
+# 7.15 Distributed Trace Integration
+
+If existing tracing is already available, Redis operations should be correlated with the existing request trace.
+
+Example:
+
+```text
+HTTP Request
+
+    ↓
+
+Agent Execution
+
+    ↓
+
+Cache GET
+
+    ↓
+
+Cosmos Query
+
+    ↓
+
+Cache SET
+
+    ↓
+
+Agent Computation
+
+    ↓
+
+Response
+```
+
+---
+
+# 7.16 Trace Example
+
+Conceptually:
+
+```mermaid
+sequenceDiagram
+
+    participant API
+    participant Agent
+    participant Redis
+    participant Cosmos
+
+    API->>Agent: Agent execution
+
+    Agent->>Redis: Cache GET
+
+    Redis-->>Agent: Miss
+
+    Agent->>Cosmos: Query
+
+    Cosmos-->>Agent: Data
+
+    Agent->>Redis: Cache SET
+
+    Agent-->>API: Result
+```
+
+Tracing should make this path visible.
+
+---
+
+# 7.17 Dashboard Requirements
+
+A Redis caching dashboard should ideally contain:
+
+```text
+Cache Hit Rate
+
+Cache Miss Rate
+
+Cache Errors
+
+Redis Latency
+
+Cosmos Fallback Count
+
+Cosmos Request Rate
+
+Application Response Latency
+
+Redis Memory Usage
+
+Redis Connections
+```
+
+---
+
+# 7.18 Example Dashboard Layout
+
+```text
+-------------------------------------
+
+Cache Hit Ratio
+
+94%
+
+-------------------------------------
+
+Cache Hits / min
+
+2,400
+
+Cache Misses / min
+
+150
+
+-------------------------------------
+
+Redis Errors
+
+3
+
+-------------------------------------
+
+Cosmos Calls
+
+Before Redis: 2,500/min
+
+After Redis: 180/min
+
+-------------------------------------
+
+P95 Response Latency
+
+Before: 850 ms
+
+After: 430 ms
+
+-------------------------------------
+```
+
+These numbers are examples only.
+
+Actual success metrics must come from testing.
+
+---
+
+# 7.19 Redis Infrastructure Metrics
+
+Infrastructure monitoring should also include:
+
+```text
+Memory Usage
+
+CPU
+
+Connections
+
+Evicted Keys
+
+Expired Keys
+
+Network Throughput
+
+Latency
+
+Availability
+```
+
+---
+
+# 7.20 Eviction Monitoring
+
+Redis may remove keys when memory limits are reached depending on configuration.
+
+Monitor:
+
+```text
+evicted_keys
+```
+
+A sudden increase may indicate:
+
+- Redis sizing too small,
+- unexpected cache growth,
+- excessively large values,
+- poor TTL strategy.
+
+---
+
+# 7.21 Key Expiration Monitoring
+
+Monitor:
+
+```text
+expired_keys
+```
+
+This helps understand how frequently TTL-based cleanup occurs.
+
+---
+
+# 7.22 Connection Monitoring
+
+Each backend pod will have its own connection pool.
+
+As pod count increases:
+
+```text
+Total Redis Connections
+```
+
+also increases.
+
+Example:
+
+```text
+10 backend pods
+
+×
+50 max connections
+
+=
+up to 500 potential connections
+```
+
+The actual pool size must therefore be validated against Redis capacity.
+
+---
+
+# 7.23 Cache Value Size
+
+Very large cached values may create:
+
+- high Redis memory use,
+- increased network time,
+- expensive serialization,
+- expensive deserialization.
+
+If practical, observe approximate serialized size.
+
+Example metric:
+
+```text
+cache_value_size_bytes
+```
+
+---
+
+# 7.24 Performance Test Scenarios
+
+Testing should include several scenarios.
+
+---
+
+## Scenario 1 — Redis Disabled
 
 ```env
 CACHE_ENABLED=false
 ```
 
-exists, rollback does not necessarily require removing Redis code.
-
-If an incident occurs:
-
-```text
-Redis caching suspected
-
-        ↓
-
-Disable cache
-
-        ↓
-
-Application goes directly to Cosmos
-```
-
-This is operationally valuable.
+Measure original application behaviour.
 
 ---
 
-# 4.62 Code Changes Required
-
-The exact filenames should be adapted to the current repository.
-
-At minimum, implementation likely requires:
-
-### Add
+## Scenario 2 — Cold Cache
 
 ```text
-cache/
-    redis_client.py
-
-cache/
-    cache_service.py
-
-cache/
-    cache_keys.py
+Redis empty
 ```
 
-Possibly:
+Send representative traffic.
+
+Measure:
+
+- Cosmos usage,
+- cache misses,
+- latency.
+
+---
+
+## Scenario 3 — Warm Cache
+
+Send same or similar traffic again.
+
+Expected:
 
 ```text
-cache/
-    serializers.py
+Cache hit ratio increases
 
-cache/
-    exceptions.py
+Cosmos traffic decreases
 ```
 
 ---
 
-### Modify
+## Scenario 4 — Redis Failure
+
+Make Redis unavailable.
+
+Expected:
 
 ```text
-application settings/configuration
+Application still works
 
-FastAPI lifespan/startup
+Cosmos fallback increases
 
-domain/data service
-
-existing Cosmos-access path
-
-dependency definitions
-
-unit tests
-
-integration tests
-
-deployment environment variables
+Cache error metric increases
 ```
 
 ---
 
-### Infrastructure Required
+## Scenario 5 — High Concurrency
+
+Send high request volume.
+
+Validate:
+
+- connection pooling,
+- Redis latency,
+- Cosmos fallback,
+- application throughput.
+
+---
+
+## Scenario 6 — Multiple Backend Pods
+
+Use multiple replicas.
+
+Verify:
 
 ```text
-LOCAL
-    Redis Podman container
+Pod 1 populates cache
 
-
-DEV
-    Managed Redis preferred
-
-
-STAGE
-    Azure Managed Redis
-
-
-PROD
-    Azure Managed Redis
+Pod 2 receives cache hit
 ```
 
 ---
 
-# 4.63 Copilot Implementation Instructions
+## Scenario 7 — Dataset Version Change
 
-When Copilot is used to implement this plan, it should follow these rules.
+Change:
+
+```env
+DATASET_VERSION
+```
+
+Verify:
 
 ```text
-1. Do not create a separate FastAPI service.
+old cache is ignored
 
-2. Do not create a separate agent service.
-
-3. FastAPI and the Custom ADK Agent remain one backend application.
-
-4. Do not run Redis server inside the backend application container.
-
-5. Do not directly add Redis GET/SET calls throughout agent code.
-
-6. Create a reusable cache abstraction.
-
-7. Keep Cosmos as the source of truth.
-
-8. Use the cache-aside pattern.
-
-9. Redis errors must fall back to Cosmos.
-
-10. Redis SET failure must not fail an otherwise successful request.
-
-11. Redis GET failure must not prevent Cosmos access.
-
-12. Cache keys must be centrally generated.
-
-13. Cache keys must include dataset version.
-
-14. Tenant/employer identifiers must be included where required.
-
-15. TTL must be configurable.
-
-16. Redis host/port/security must be configuration-driven.
-
-17. Do not hard-code credentials.
-
-18. Use asynchronous Redis operations.
-
-19. Reuse Redis connection pools.
-
-20. Initialize Redis during application lifecycle.
-
-21. Close Redis resources during shutdown.
-
-22. Add hit/miss/error observability.
-
-23. Add unit tests for cache hit, miss and failure.
-
-24. Preserve existing agent behaviour.
-
-25. Do not introduce conversation memory into Redis as part of this work.
+new cache namespace populates
 ```
 
 ---
 
-# 4.64 Copilot Must Inspect Existing Code Before Creating New Layers
+# 7.25 Cache Effectiveness Test
 
-Before adding new files, Copilot should inspect whether equivalent components already exist.
+Suppose the same employer data is requested 10,000 times.
 
-Examples:
-
-```text
-Existing Cosmos Repository?
-
-Existing Service Layer?
-
-Existing Settings Class?
-
-Existing Dependency Injection?
-
-Existing FastAPI Lifespan?
-
-Existing Metrics Utility?
-
-Existing Logging Utility?
-```
-
-If yes:
-
-> Extend the existing abstraction instead of creating duplicate architecture.
-
-For example, if the repository already contains:
+Without cache:
 
 ```text
-src/database/cosmos.py
-```
-
-do not automatically create:
-
-```text
-src/repositories/cosmos_repository.py
-```
-
-unless restructuring is explicitly approved.
-
----
-
-# 4.65 Implementation Sequence for Copilot
-
-Recommended code implementation order:
-
-```text
-Step 1
-Inspect existing Cosmos access path.
-
-Step 2
-Identify the service that should own cache-aside logic.
-
-Step 3
-Add Redis dependency.
-
-Step 4
-Add configuration fields.
-
-Step 5
-Create Redis client initialization.
-
-Step 6
-Create cache abstraction/service.
-
-Step 7
-Create centralized cache key builder.
-
-Step 8
-Integrate cache-aside logic into one domain data path.
-
-Step 9
-Add graceful error handling.
-
-Step 10
-Add logs and metrics.
-
-Step 11
-Add unit tests.
-
-Step 12
-Run locally using Podman Redis.
-
-Step 13
-Validate cache hit and cache miss.
-
-Step 14
-Validate Redis failure fallback.
-
-Step 15
-Only then expand caching to additional data paths.
-```
-
----
-
-# 4.66 Do Not Cache Everything in the First Pull Request
-
-The first implementation should preferably prove the pattern using one high-value data path.
-
-For example:
-
-```text
-Employer Plan Retrieval
-```
-
-Once this works:
-
-```text
-Cache abstraction proven
-
-Key design proven
-
-Redis connectivity proven
-
-Fallback proven
-
-Metrics proven
-```
-
-Then additional data paths can be migrated.
-
-This reduces implementation risk.
-
----
-
-# 4.67 Definition of Done for Code Implementation
-
-The Redis implementation is considered functionally complete when all of the following are true:
-
-```text
-[ ] Application starts with Redis enabled.
-
-[ ] Application starts with Redis disabled.
-
-[ ] Redis client is created once per backend process.
-
-[ ] Redis client uses connection pooling.
-
-[ ] Cache hit avoids Cosmos retrieval.
-
-[ ] Cache miss retrieves from Cosmos.
-
-[ ] Cache miss populates Redis.
-
-[ ] Redis GET failure falls back to Cosmos.
-
-[ ] Redis SET failure does not fail user request.
-
-[ ] Cache keys include dataset version.
-
-[ ] Cache TTL is configurable.
-
-[ ] Local Redis works through Podman.
-
-[ ] Multiple backend replicas share the same Redis cache.
-
-[ ] Cache hit metrics exist.
-
-[ ] Cache miss metrics exist.
-
-[ ] Cache error metrics exist.
-
-[ ] Logs contain enough information for troubleshooting.
-
-[ ] No Redis credentials are committed to source control.
-
-[ ] Existing Custom Framework Memory Server is not required.
-
-[ ] Agent code is not directly coupled to Redis.
-
-[ ] Unit tests pass.
-
-[ ] Integration tests pass.
-
-[ ] Stage fallback testing succeeds.
-```
-
----
-
-# 4.68 Final Code-Side Architecture
-
-After implementation, the application should conceptually look like:
-
-```mermaid
-flowchart TD
-
-    API[FastAPI]
-
-    AGENT[Custom ADK Agent]
-
-    TOOL[Agent Tool / Application Operation]
-
-    SERVICE[Domain Service]
-
-    CACHE[Cache Service]
-
-    KEY[Cache Key Builder]
-
-    REPO[Cosmos Repository]
-
-    REDISCLIENT[Redis Client + Connection Pool]
-
-    REDIS[(Azure Managed Redis)]
-
-    COSMOS[(Cosmos DB)]
-
-    API --> AGENT
-
-    AGENT --> TOOL
-
-    TOOL --> SERVICE
-
-    SERVICE --> CACHE
-
-    SERVICE --> REPO
-
-    CACHE --> KEY
-
-    CACHE --> REDISCLIENT
-
-    REDISCLIENT --> REDIS
-
-    REPO --> COSMOS
-```
-
-The important separation is:
-
-```text
-Agent
+10,000 requests
     ↓
-asks for business/domain data
-
-Domain Service
-    ↓
-decides how data is retrieved
-
-Cache Service
-    ↓
-knows Redis
-
-Cosmos Repository
-    ↓
-knows Cosmos
+potentially 10,000 Cosmos reads
 ```
 
-The agent itself does not need to understand the caching infrastructure.
-
----
-
-# 4.69 Final Implementation Principle
-
-The most important code principle is:
+With cache:
 
 ```text
-Caching should be transparent to the agent.
-```
-
-From the agent's perspective:
-
-```python
-plans = await plan_service.get_employer_plans(
-    employer_id
-)
-```
-
-The agent should not care whether internally that operation was:
-
-```text
-Redis Hit
-```
-
-or:
-
-```text
-Redis Miss
+First request
     ↓
 Cosmos
+
+Remaining repeated requests
     ↓
-Redis Populate
+Redis
 ```
 
-or:
+The actual reduction depends on access patterns and TTL.
+
+---
+
+# 7.26 Load Testing Questions
+
+Load testing should answer:
 
 ```text
-Redis Failure
-    ↓
-Cosmos Fallback
+Does Redis reduce P95 latency?
+
+Does Redis reduce Cosmos RU usage?
+
+Does Redis become a bottleneck?
+
+Does the backend connection pool behave correctly?
+
+Do Redis errors affect user response times?
+
+Does fallback remain stable under Redis outage?
 ```
 
-That separation keeps the architecture maintainable and allows Redis to remain what it should be:
+---
 
-> **A performance optimization, not a business dependency.**
+# 7.27 Success Criteria
+
+Redis should not be considered successful simply because:
+
+```text
+No errors are seen.
+```
+
+The solution should demonstrate measurable value.
+
+Example success criteria:
+
+```text
+High cache hit rate for reusable data
+
+Reduced repeated Cosmos queries
+
+Reduced Cosmos RU consumption
+
+No functional regression
+
+No cross-tenant cache issue
+
+Redis failure does not cause application outage
+
+No unacceptable latency increase on cache miss
+
+Stable operation with multiple AKS replicas
+```
+
+---
+
+# 7.28 Alerting
+
+Recommended alerts may include:
+
+```text
+High Redis Error Rate
+
+High Redis Latency
+
+Redis Unavailable
+
+Very Low Cache Hit Ratio
+
+High Eviction Rate
+
+Redis Memory Near Limit
+
+Unexpected Cosmos Fallback Increase
+
+Unexpected Cosmos RU Increase
+```
+
+---
+
+# 7.29 Example Alert Logic
+
+Example:
+
+```text
+Redis cache error rate
+>
+5%
+for
+5 minutes
+```
+
+could trigger investigation.
+
+Actual thresholds should be based on production baseline.
+
+---
+
+# 7.30 Low Cache Hit Ratio Alert
+
+A low hit ratio does not always mean failure.
+
+For example, a new deployment may have a cold cache.
+
+Therefore alerts should avoid triggering immediately after:
+
+```text
+Redis restart
+
+dataset version change
+
+deployment
+```
+
+Consider warm-up behaviour when setting thresholds.
+
+---
+
+# 7.31 Cosmos Fallback Alert
+
+Normally:
+
+```text
+Cosmos fallback
+```
+
+should correspond mostly to cache misses.
+
+If suddenly:
+
+```text
+Cosmos fallback increases massively
+```
+
+while:
+
+```text
+Redis error rate also increases
+```
+
+this likely indicates a Redis problem.
+
+---
+
+# 7.32 Observability Correlation
+
+A useful dashboard correlation is:
+
+```text
+Redis Errors
+        ↑
+
+Cache Hit Ratio
+        ↓
+
+Cosmos Requests
+        ↑
+```
+
+Together these strongly suggest Redis degradation.
+
+---
+
+# 7.33 Performance Baseline Table
+
+The team should record measurements.
+
+Example template:
+
+| Metric | Before Redis | Cold Cache | Warm Cache |
+|---|---:|---:|---:|
+| P50 Latency | TBD | TBD | TBD |
+| P95 Latency | TBD | TBD | TBD |
+| P99 Latency | TBD | TBD | TBD |
+| Cosmos Calls/min | TBD | TBD | TBD |
+| Cosmos RU/min | TBD | TBD | TBD |
+| Cache Hit Ratio | N/A | TBD | TBD |
+| Error Rate | TBD | TBD | TBD |
+| Requests/sec | TBD | TBD | TBD |
+
+Do not populate this table with assumed numbers.
+
+Use actual DEV/STAGE test results.
+
+---
+
+# 7.34 Observability Ownership
+
+### Application Team
+
+Owns:
+
+- cache hit/miss metrics,
+- cache error metrics,
+- trace instrumentation,
+- cache fallback logs.
+
+---
+
+### Platform / DevOps
+
+Owns:
+
+- Redis infrastructure metrics,
+- Redis availability monitoring,
+- Redis memory alerts,
+- network alerts.
+
+---
+
+### Joint Ownership
+
+Both teams should validate:
+
+```text
+application behaviour
++
+infrastructure behaviour
+```
+
+during Redis incidents.
+
+---
+
+# 7.35 Final Observability Principle
+
+The Redis implementation is only complete when the team can confidently answer:
+
+```text
+Is Redis working?
+
+Is Redis useful?
+
+Is Redis fast?
+
+Is Redis reducing Cosmos usage?
+
+Is Redis failing safely?
+
+Is Redis causing any new bottleneck?
+```
+
+If these questions cannot be answered from logs, metrics, and traces, observability is incomplete.
